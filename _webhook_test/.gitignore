@@ -1,0 +1,10 @@
+# Webhook test logs
+logs/
+*.json
+
+# Server logs
+server.log
+
+# Compiled binaries
+server
+*.exe

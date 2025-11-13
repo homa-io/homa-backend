@@ -1,0 +1,25 @@
+services:
+  nats:
+    image: nats:latest
+    container_name: nats
+    restart: unless-stopped
+    ports:
+      - "4222:4222"  # Client connections
+      - "8222:8222"  # HTTP management/monitoring
+      - "6222:6222"  # Cluster connections
+    command:
+      - "-js"        # Enable JetStream for persistence
+      - "-m"         # Enable monitoring endpoint
+      - "8222"
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:8222/healthz"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    volumes:
+      - nats_data:/data
+
+volumes:
+  nats_data:
+    driver: local

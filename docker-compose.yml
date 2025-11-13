@@ -1,0 +1,69 @@
+version: '3.8'
+
+services:
+  homa:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        COMMIT_HASH: ${COMMIT_HASH:-dev}
+        BUILDNUMBER: ${BUILDNUMBER:-1}
+        AUTHOR: ${AUTHOR:-docker}
+        BUILD_TIMESTAMP: ${BUILD_TIMESTAMP}
+    image: homa:latest
+    container_name: homa-app
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    environment:
+      - DB_HOST=mysql
+      - DB_PORT=3306
+      - DB_USER=homa
+      - DB_PASSWORD=homa_password
+      - DB_NAME=homa
+      - JWT_SECRET=your-super-secret-jwt-key-change-in-production
+    depends_on:
+      mysql:
+        condition: service_healthy
+    command: ["./homa", "-c", "config.yml", "--migration-do"]
+    volumes:
+      - ./config.production.yml:/app/config.yml:ro
+    networks:
+      - homa-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  mysql:
+    image: mysql:8.0
+    container_name: homa-mysql
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: root_password
+      MYSQL_DATABASE: homa
+      MYSQL_USER: homa
+      MYSQL_PASSWORD: homa_password
+    ports:
+      - "3306:3306"
+    volumes:
+      - mysql_data:/var/lib/mysql
+      - ./scripts/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    networks:
+      - homa-network
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+volumes:
+  mysql_data:
+    driver: local
+
+networks:
+  homa-network:
+    driver: bridge

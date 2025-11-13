@@ -1,0 +1,43 @@
+# Git
+.git
+.gitignore
+
+# Documentation
+README.md
+docs/
+*.md
+
+# Development files
+.idea/
+.vscode/
+*.log
+
+# Built binaries
+homa
+seafy
+
+# Development configs
+config.dev.yml
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Temporary files
+*.tmp
+*.temp
+
+# Test files
+*_test.go
+test/
+
+# Node modules (if any)
+node_modules/
+
+# Database files
+*.db
+*.sqlite
+
+# Coverage files
+*.out
+coverage.html

@@ -1,0 +1,441 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Homa Login - OAuth Testing</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 20px;
+        }
+
+        .login-container {
+            background: white;
+            border-radius: 12px;
+            box-shadow: 0 20px 60px rgba(0, 0, 0, 0.15);
+            padding: 40px;
+            width: 100%;
+            max-width: 420px;
+        }
+
+        .logo {
+            text-align: center;
+            margin-bottom: 30px;
+        }
+
+        .logo h1 {
+            color: #333;
+            font-size: 28px;
+            font-weight: 600;
+            margin-bottom: 8px;
+        }
+
+        .logo p {
+            color: #666;
+            font-size: 14px;
+        }
+
+        .login-form {
+            margin-bottom: 30px;
+        }
+
+        .form-group {
+            margin-bottom: 20px;
+        }
+
+        label {
+            display: block;
+            margin-bottom: 6px;
+            color: #333;
+            font-weight: 500;
+            font-size: 14px;
+        }
+
+        input[type="email"],
+        input[type="password"] {
+            width: 100%;
+            padding: 12px 16px;
+            border: 2px solid #e1e5e9;
+            border-radius: 8px;
+            font-size: 16px;
+            transition: border-color 0.2s;
+        }
+
+        input[type="email"]:focus,
+        input[type="password"]:focus {
+            outline: none;
+            border-color: #667eea;
+        }
+
+        .btn {
+            width: 100%;
+            padding: 12px 16px;
+            border: none;
+            border-radius: 8px;
+            font-size: 16px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.2s;
+            text-decoration: none;
+            display: inline-block;
+            text-align: center;
+            margin-bottom: 12px;
+        }
+
+        .btn-primary {
+            background: #667eea;
+            color: white;
+        }
+
+        .btn-primary:hover {
+            background: #5a6fd8;
+            transform: translateY(-1px);
+        }
+
+        .btn-google {
+            background: #db4437;
+            color: white;
+        }
+
+        .btn-google:hover {
+            background: #c23321;
+            transform: translateY(-1px);
+        }
+
+        .btn-microsoft {
+            background: #00a1f1;
+            color: white;
+        }
+
+        .btn-microsoft:hover {
+            background: #0078d4;
+            transform: translateY(-1px);
+        }
+
+        .divider {
+            text-align: center;
+            margin: 30px 0;
+            position: relative;
+        }
+
+        .divider::before {
+            content: '';
+            position: absolute;
+            top: 50%;
+            left: 0;
+            right: 0;
+            height: 1px;
+            background: #e1e5e9;
+        }
+
+        .divider span {
+            background: white;
+            padding: 0 20px;
+            color: #666;
+            font-size: 14px;
+        }
+
+        .oauth-buttons {
+            display: flex;
+            flex-direction: column;
+            gap: 12px;
+        }
+
+        .oauth-info {
+            background: #f8f9fa;
+            border: 1px solid #e1e5e9;
+            border-radius: 8px;
+            padding: 16px;
+            margin-bottom: 20px;
+        }
+
+        .oauth-info h3 {
+            color: #333;
+            font-size: 16px;
+            margin-bottom: 8px;
+        }
+
+        .oauth-info p {
+            color: #666;
+            font-size: 14px;
+            line-height: 1.4;
+        }
+
+        .response-area {
+            margin-top: 30px;
+            padding: 20px;
+            background: #f8f9fa;
+            border-radius: 8px;
+            display: none;
+        }
+
+        .response-area h3 {
+            color: #333;
+            margin-bottom: 10px;
+        }
+
+        .response-area pre {
+            background: #fff;
+            padding: 15px;
+            border-radius: 6px;
+            border: 1px solid #e1e5e9;
+            overflow-x: auto;
+            font-size: 12px;
+            white-space: pre-wrap;
+        }
+
+        .test-user {
+            background: #e3f2fd;
+            border: 1px solid #90caf9;
+            border-radius: 8px;
+            padding: 16px;
+            margin-bottom: 20px;
+        }
+
+        .test-user h3 {
+            color: #1976d2;
+            font-size: 16px;
+            margin-bottom: 8px;
+        }
+
+        .test-user p {
+            color: #1565c0;
+            font-size: 14px;
+            line-height: 1.4;
+            margin-bottom: 4px;
+        }
+
+        @media (max-width: 480px) {
+            .login-container {
+                padding: 30px 20px;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="login-container">
+        <div class="logo">
+            <h1>Nexa</h1>
+            <p>Intelligent Support System</p>
+        </div>
+
+        <div class="test-user">
+            <h3>Test User Created</h3>
+            <p><strong>Email:</strong> reza@hashemi.dev</p>
+            <p><strong>Password:</strong> lightbear11</p>
+            <p><strong>Name:</strong> Reza Hashemi</p>
+        </div>
+
+        <div class="oauth-info">
+            <h3>OAuth Testing</h3>
+            <p>This page allows you to test OAuth login with Google and Microsoft. Make sure to configure OAuth credentials in the application first (see docs/oauth.md).</p>
+        </div>
+
+        <!-- Traditional Login Form -->
+        <form class="login-form" id="loginForm">
+            <div class="form-group">
+                <label for="email">Email</label>
+                <input type="email" id="email" name="email" value="reza@hashemi.dev" required>
+            </div>
+            <div class="form-group">
+                <label for="password">Password</label>
+                <input type="password" id="password" name="password" value="lightbear11" required>
+            </div>
+            <button type="submit" class="btn btn-primary">Login with Email/Password</button>
+        </form>
+
+        <div class="divider">
+            <span>or continue with</span>
+        </div>
+
+        <!-- OAuth Buttons -->
+        <div class="oauth-buttons">
+            <a href="/api/auth/oauth/google?redirect_url=/static/login.html" class="btn btn-google">
+                🔍 Login with Google
+            </a>
+            <a href="/api/auth/oauth/microsoft?redirect_url=/static/login.html" class="btn btn-microsoft">
+                🏢 Login with Microsoft
+            </a>
+        </div>
+
+        <!-- API Testing Buttons -->
+        <div class="divider">
+            <span>API Testing</span>
+        </div>
+        
+        <button onclick="testOAuthProviders()" class="btn btn-primary">
+            🔧 Test OAuth Providers API
+        </button>
+
+        <!-- Response Area -->
+        <div class="response-area" id="responseArea">
+            <h3>Response:</h3>
+            <pre id="responseContent"></pre>
+        </div>
+    </div>
+
+    <script>
+        // Handle traditional login
+        document.getElementById('loginForm').addEventListener('submit', async (e) => {
+            e.preventDefault();
+            
+            const formData = new FormData(e.target);
+            const data = {
+                email: formData.get('email'),
+                password: formData.get('password')
+            };
+
+            try {
+                const response = await fetch('/api/auth/login', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify(data)
+                });
+
+                const result = await response.json();
+                showResponse(result, response.status);
+                
+                if (response.ok && result.success && result.data && result.data.access_token) {
+                    // Store token for testing
+                    localStorage.setItem('nexa_token', result.data.access_token);
+                    
+                    // Add profile test button
+                    addProfileTestButton();
+                }
+            } catch (error) {
+                showResponse({ error: 'Network error', message: error.message }, 500);
+            }
+        });
+
+        // Test OAuth providers API
+        async function testOAuthProviders() {
+            try {
+                const response = await fetch('/api/auth/oauth/providers');
+                const result = await response.json();
+                showResponse(result, response.status);
+            } catch (error) {
+                showResponse({ error: 'Network error', message: error.message }, 500);
+            }
+        }
+
+        // Show response in the response area
+        function showResponse(data, status) {
+            const responseArea = document.getElementById('responseArea');
+            const responseContent = document.getElementById('responseContent');
+            
+            responseContent.textContent = JSON.stringify(data, null, 2);
+            responseArea.style.display = 'block';
+            
+            // Scroll to response
+            responseArea.scrollIntoView({ behavior: 'smooth' });
+        }
+
+        // Handle URL parameters (for OAuth callback)
+        window.addEventListener('load', () => {
+            const urlParams = new URLSearchParams(window.location.search);
+            const oauth = urlParams.get('oauth');
+            
+            if (oauth === 'success') {
+                const data = urlParams.get('data');
+                if (data) {
+                    try {
+                        const decodedData = atob(decodeURIComponent(data));
+                        const oauthResponse = JSON.parse(decodedData);
+                        
+                        // Store token for testing
+                        localStorage.setItem('nexa_token', oauthResponse.access_token);
+                        
+                        showResponse({
+                            success: 'OAuth login successful!',
+                            access_token: oauthResponse.access_token,
+                            refresh_token: oauthResponse.refresh_token,
+                            expires_in: oauthResponse.expires_in,
+                            user: oauthResponse.user
+                        }, 200);
+                        
+                        // Add profile test button since user is now logged in
+                        addProfileTestButton();
+                        
+                    } catch (e) {
+                        showResponse({ 
+                            error: 'OAuth Success', 
+                            message: 'Login successful but failed to parse response data',
+                            raw_data: data
+                        }, 200);
+                    }
+                }
+            } else if (oauth === 'error') {
+                const message = urlParams.get('message');
+                showResponse({ 
+                    error: 'OAuth Error', 
+                    message: decodeURIComponent(message || 'Unknown OAuth error')
+                }, 400);
+            }
+            
+            // Clean URL after processing
+            if (oauth) {
+                const cleanUrl = window.location.pathname;
+                window.history.replaceState({}, document.title, cleanUrl);
+            }
+        });
+
+        // Test profile API with stored token
+        async function testProfile() {
+            const token = localStorage.getItem('nexa_token');
+            if (!token) {
+                showResponse({ error: 'No token', message: 'Please login first' }, 401);
+                return;
+            }
+
+            try {
+                const response = await fetch('/api/auth/profile', {
+                    headers: {
+                        'Authorization': `Bearer ${token}`
+                    }
+                });
+
+                const result = await response.json();
+                showResponse(result, response.status);
+            } catch (error) {
+                showResponse({ error: 'Network error', message: error.message }, 500);
+            }
+        }
+
+        // Add profile test button dynamically
+        function addProfileTestButton() {
+            // Remove existing profile button if any
+            const existingBtn = document.getElementById('profileTestBtn');
+            if (existingBtn) {
+                existingBtn.remove();
+            }
+            
+            const oauthButtons = document.querySelector('.oauth-buttons');
+            const profileBtn = document.createElement('button');
+            profileBtn.id = 'profileTestBtn';
+            profileBtn.textContent = '👤 Test Profile API';
+            profileBtn.className = 'btn btn-primary';
+            profileBtn.onclick = testProfile;
+            oauthButtons.appendChild(profileBtn);
+        }
+        
+        // Add profile test button if user is already logged in
+        if (localStorage.getItem('nexa_token')) {
+            addProfileTestButton();
+        }
+    </script>
+</body>
+</html>
