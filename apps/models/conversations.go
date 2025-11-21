@@ -44,12 +44,17 @@ type Conversation struct {
 	ChannelID    string         `gorm:"column:channel_id;size:50;not null;index;fk:channels" json:"channel_id"`
 	ExternalID   *string        `gorm:"column:external_id;size:255;index" json:"external_id"`
 	Secret       string         `gorm:"column:secret;size:32;not null" json:"secret"` // Exposed in JSON - conversation_id + secret acts as credentials
-	Status       string         `gorm:"column:status;size:50;not null;check:status IN ('new','wait_for_agent','in_progress','wait_for_user','on_hold','resolved','closed','unresolved','spam')" json:"status"`
-	Priority     string         `gorm:"column:priority;size:50;not null;check:priority IN ('low','medium','high','urgent')" json:"priority"`
-	CustomFields datatypes.JSON `gorm:"column:custom_fields;type:json" json:"custom_fields"`
-	CreatedAt    time.Time      `gorm:"column:created_at;autoCreateTime" json:"created_at"`
-	UpdatedAt    time.Time      `gorm:"column:updated_at;autoUpdateTime" json:"updated_at"`
-	ClosedAt     *time.Time     `gorm:"column:closed_at" json:"closed_at"`
+	Status          string         `gorm:"column:status;size:50;not null;check:status IN ('new','wait_for_agent','in_progress','wait_for_user','on_hold','resolved','closed','unresolved','spam')" json:"status"`
+	Priority        string         `gorm:"column:priority;size:50;not null;check:priority IN ('low','medium','high','urgent')" json:"priority"`
+	CustomFields    datatypes.JSON `gorm:"column:custom_fields;type:json" json:"custom_fields"`
+	IP              *string        `gorm:"column:ip;size:45" json:"ip"`
+	Browser         *string        `gorm:"column:browser;size:255" json:"browser"`
+	OperatingSystem *string        `gorm:"column:operating_system;size:255" json:"operating_system"`
+	Language        *string        `gorm:"column:language;size:10" json:"language"`
+	Timezone        *string        `gorm:"column:timezone;size:50" json:"timezone"`
+	CreatedAt       time.Time      `gorm:"column:created_at;autoCreateTime" json:"created_at"`
+	UpdatedAt       time.Time      `gorm:"column:updated_at;autoUpdateTime" json:"updated_at"`
+	ClosedAt        *time.Time     `gorm:"column:closed_at" json:"closed_at"`
 
 	// Relationships
 	Client      Client                   `gorm:"foreignKey:ClientID;references:ID" json:"client,omitempty"`
@@ -90,6 +95,16 @@ type Tag struct {
 }
 
 // GORM Hooks for Conversation
+
+// BeforeCreate hook - set default values
+func (c *Conversation) BeforeCreate(tx *gorm.DB) error {
+	// Set default timezone to UTC if not provided
+	if c.Timezone == nil {
+		utc := "UTC"
+		c.Timezone = &utc
+	}
+	return nil
+}
 
 // AfterCreate hook - broadcast conversation creation to NATS and webhooks
 func (c *Conversation) AfterCreate(tx *gorm.DB) error {

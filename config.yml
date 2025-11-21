@@ -1,8 +1,8 @@
 Database:
-  Cache: "false"
+  Cache: false
   ConnMaxLifTime: 1h
   Database: "homa"
-  Debug: "3"
+  Debug: 3
   Enabled: true
   MaxIdleConns: 10
   MaxOpenConns: 100
