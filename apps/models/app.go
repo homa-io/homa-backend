@@ -22,6 +22,7 @@ func (a App) Register() error {
 	db.UseModel(CustomAttribute{})
 	db.UseModel(Webhook{})
 	db.UseModel(WebhookDelivery{})
+	db.UseModel(CannedMessage{})
 
 	return nil
 }
