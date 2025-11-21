@@ -53,6 +53,21 @@ type GetConversationWithSecretResponse struct {
 	MessageLimit  int                 `json:"message_limit"`
 }
 
+// GetConversationDetailResponse represents the response structure for conversation detail with relations
+type GetConversationDetailResponse struct {
+	Conversation  models.Conversation            `json:"conversation"`
+	Client        models.Client                  `json:"client"`
+	Department    *models.Department             `json:"department"`
+	Channel       models.Channel                 `json:"channel"`
+	Tags          []models.Tag                   `json:"tags"`
+	Assignments   []models.ConversationAssignment `json:"assignments"`
+	Messages      []models.Message               `json:"messages"`
+	TotalMessages int64                          `json:"total_messages"`
+	CurrentPage   int                            `json:"current_page"`
+	PageSize      int                            `json:"page_size"`
+	TotalPages    int                            `json:"total_pages"`
+}
+
 // UpsertClientRequest represents the request structure for upserting a client
 type UpsertClientRequest struct {
 	Type       string         `json:"type" validate:"required,oneof=email phone whatsapp slack telegram web chat" example:"email"`
@@ -535,5 +550,96 @@ func (c Controller) GetConversationAssignments(req *evo.Request) interface{} {
 		return response.Error(response.NewErrorWithDetails(response.ErrorCodeDatabaseError, "Failed to get conversation assignments", 500, err.Error()))
 	}
 
-	return response.List(assignments, len(assignments))
+
+// GetConversationDetail returns a conversation with all relations and paginated messages
+// @Summary Get conversation detail with relations
+// @Description Get a single conversation with all related data (client, department, channel, tags, assignments) and paginated messages. Requires authentication.
+// @Tags Admin - Conversations
+// @Accept json
+// @Produce json
+// @Param conversation_id path int true "Conversation ID"
+// @Param page query int false "Page number for messages pagination (default: 1)"
+// @Param page_size query int false "Page size for messages pagination (default: 20, max: 100)"
+// @Success 200 {object} GetConversationDetailResponse
+// @Router /api/admin/conversations/{conversation_id} [get]
+func (c Controller) GetConversationDetail(req *evo.Request) interface{} {
+	// Parse conversation ID
+	conversationIDStr := req.Param("conversation_id").String()
+	conversationID, err := strconv.ParseUint(conversationIDStr, 10, 32)
+	if err != nil {
+		return response.Error(response.ErrInvalidConversationID)
+	}
+
+	// Get pagination parameters with defaults
+	page := req.Query("page").Int()
+	if page < 1 {
+		page = 1
+	}
+
+	pageSize := req.Query("page_size").Int()
+	if pageSize < 1 {
+		pageSize = 20
+	}
+	if pageSize > 100 {
+		pageSize = 100
+	}
+
+	// Calculate offset
+	offset := (page - 1) * pageSize
+
+	// Get conversation with all relations
+	var conversation models.Conversation
+	if err := db.Preload("Client").
+		Preload("Department").
+		Preload("Channel").
+		Preload("Tags").
+		Preload("Assignments").
+		Preload("Assignments.User").
+		First(&conversation, uint(conversationID)).Error; err != nil {
+		log.Error("Failed to get conversation:", err)
+		return response.Error(response.ErrConversationNotFound)
+	}
+
+	// Get total message count
+	var totalMessages int64
+	if err := db.Model(&models.Message{}).Where("conversation_id = ?", conversationID).Count(&totalMessages).Error; err != nil {
+		log.Error("Failed to count messages:", err)
+		return response.Error(response.NewErrorWithDetails(response.ErrorCodeDatabaseError, "Failed to count messages", 500, err.Error()))
+	}
+
+	// Get paginated messages
+	var messages []models.Message
+	if err := db.Where("conversation_id = ?", conversationID).
+		Preload("User").
+		Preload("Client").
+		Order("created_at ASC").
+		Limit(pageSize).
+		Offset(offset).
+		Find(&messages).Error; err != nil {
+		log.Error("Failed to get messages:", err)
+		return response.Error(response.NewErrorWithDetails(response.ErrorCodeDatabaseError, "Failed to get messages", 500, err.Error()))
+	}
+
+	// Calculate total pages
+	totalPages := int(totalMessages) / pageSize
+	if int(totalMessages)%pageSize != 0 {
+		totalPages++
+	}
+
+	// Build response
+	resp := GetConversationDetailResponse{
+		Conversation:  conversation,
+		Client:        conversation.Client,
+		Department:    conversation.Department,
+		Channel:       conversation.Channel,
+		Tags:          conversation.Tags,
+		Assignments:   conversation.Assignments,
+		Messages:      messages,
+		TotalMessages: totalMessages,
+		CurrentPage:   page,
+		PageSize:      pageSize,
+		TotalPages:    totalPages,
+	}
+
+	return response.OK(resp)
 }

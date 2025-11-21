@@ -21,6 +21,9 @@ func (a App) Router() error {
 	evo.Delete("/api/client/conversations/:conversation_id/:secret", controller.CloseConversationWithSecret)
 	evo.Post("/api/client/upsert", controller.UpsertClient) // Changed to POST to match UI
 
+	// Admin conversation APIs
+	evo.Get("/api/admin/conversations/:conversation_id", controller.GetConversationDetail)
+
 	// Admin assignment APIs
 	evo.Post("/api/admin/conversations/:conversation_id/assign/user", controller.AssignConversationToUser)
 	evo.Post("/api/admin/conversations/:conversation_id/assign/department", controller.AssignConversationToDepartment)
