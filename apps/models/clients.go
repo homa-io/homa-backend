@@ -23,6 +23,8 @@ type Client struct {
 	ID        uuid.UUID      `gorm:"column:id;type:char(36);primaryKey" json:"id"`
 	Name      string         `gorm:"column:name;size:255;not null" json:"name"`
 	Data      datatypes.JSON `gorm:"column:data;type:json" json:"data"`
+	Language  *string        `gorm:"column:language;size:10" json:"language"`
+	Timezone  *string        `gorm:"column:timezone;size:50" json:"timezone"`
 	CreatedAt time.Time      `gorm:"column:created_at;autoCreateTime" json:"created_at"`
 	UpdatedAt time.Time      `gorm:"column:updated_at;autoUpdateTime" json:"updated_at"`
 
@@ -47,9 +49,16 @@ type ClientExternalID struct {
 	restify.API
 }
 
-// BeforeCreate hook to generate UUID for Client
+// BeforeCreate hook to generate UUID for Client and set default values
 func (c *Client) BeforeCreate(tx *gorm.DB) error {
 	c.ID = uuid.New()
+
+	// Set default timezone to UTC if not provided
+	if c.Timezone == nil {
+		utc := "UTC"
+		c.Timezone = &utc
+	}
+
 	return nil
 }
 

@@ -50,8 +50,6 @@ type Conversation struct {
 	IP              *string        `gorm:"column:ip;size:45" json:"ip"`
 	Browser         *string        `gorm:"column:browser;size:255" json:"browser"`
 	OperatingSystem *string        `gorm:"column:operating_system;size:255" json:"operating_system"`
-	Language        *string        `gorm:"column:language;size:10" json:"language"`
-	Timezone        *string        `gorm:"column:timezone;size:50" json:"timezone"`
 	CreatedAt       time.Time      `gorm:"column:created_at;autoCreateTime" json:"created_at"`
 	UpdatedAt       time.Time      `gorm:"column:updated_at;autoUpdateTime" json:"updated_at"`
 	ClosedAt        *time.Time     `gorm:"column:closed_at" json:"closed_at"`
@@ -96,15 +94,6 @@ type Tag struct {
 
 // GORM Hooks for Conversation
 
-// BeforeCreate hook - set default values
-func (c *Conversation) BeforeCreate(tx *gorm.DB) error {
-	// Set default timezone to UTC if not provided
-	if c.Timezone == nil {
-		utc := "UTC"
-		c.Timezone = &utc
-	}
-	return nil
-}
 
 // AfterCreate hook - broadcast conversation creation to NATS and webhooks
 func (c *Conversation) AfterCreate(tx *gorm.DB) error {
