@@ -550,6 +550,8 @@ func (c Controller) GetConversationAssignments(req *evo.Request) interface{} {
 		return response.Error(response.NewErrorWithDetails(response.ErrorCodeDatabaseError, "Failed to get conversation assignments", 500, err.Error()))
 	}
 
+	return response.OK(assignments)
+}
 
 // GetConversationDetail returns a conversation with all relations and paginated messages
 // @Summary Get conversation detail with relations

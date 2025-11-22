@@ -13,6 +13,7 @@ func (a App) Register() error {
 
 func (a App) Router() error {
 	var controller = Controller{}
+	var agentController = AgentController{}
 
 	// Client-facing APIs
 	evo.Put("/api/client/conversations", controller.CreateConversation)
@@ -29,6 +30,14 @@ func (a App) Router() error {
 	evo.Post("/api/admin/conversations/:conversation_id/assign/department", controller.AssignConversationToDepartment)
 	evo.Delete("/api/admin/conversations/:conversation_id/unassign", controller.UnassignConversation)
 	evo.Get("/api/admin/conversations/:conversation_id/assignments", controller.GetConversationAssignments)
+
+	// Agent APIs for conversations
+	evo.Get("/api/agent/conversations/search", agentController.SearchConversations)
+	evo.Get("/api/agent/conversations/:conversation_id/messages", agentController.GetConversationMessages)
+	evo.Get("/api/agent/conversations/unread-count", agentController.GetUnreadCount)
+	evo.Patch("/api/agent/conversations/:id/read", agentController.MarkConversationRead)
+	evo.Get("/api/agent/departments", agentController.GetDepartments)
+	evo.Get("/api/agent/tags", agentController.GetTags)
 
 	return nil
 }
