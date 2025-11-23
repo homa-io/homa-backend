@@ -7,7 +7,8 @@ import (
 )
 
 type ConversationAssignment struct {
-	ConversationID uint       `gorm:"column:conversation_id;primaryKey;fk:conversations" json:"conversation_id"`
+	ID             uint       `gorm:"column:id;primaryKey;autoIncrement" json:"id"`
+	ConversationID uint       `gorm:"column:conversation_id;index;fk:conversations" json:"conversation_id"`
 	UserID         *uuid.UUID `gorm:"column:user_id;type:char(36);index;fk:users" json:"user_id"`
 	DepartmentID   *uint      `gorm:"column:department_id;index;fk:departments" json:"department_id"`
 

@@ -33,11 +33,19 @@ func (a App) Router() error {
 
 	// Agent APIs for conversations
 	evo.Get("/api/agent/conversations/search", agentController.SearchConversations)
+	evo.Get("/api/agent/conversations/:id", agentController.GetConversationDetail)
 	evo.Get("/api/agent/conversations/:conversation_id/messages", agentController.GetConversationMessages)
 	evo.Get("/api/agent/conversations/unread-count", agentController.GetUnreadCount)
 	evo.Patch("/api/agent/conversations/:id/read", agentController.MarkConversationRead)
 	evo.Get("/api/agent/departments", agentController.GetDepartments)
+	evo.Get("/api/agent/users", agentController.GetUsers)
 	evo.Get("/api/agent/tags", agentController.GetTags)
+	evo.Post("/api/agent/tags", agentController.CreateTag)
+	evo.Get("/api/agent/clients/:client_id/conversations", agentController.GetClientPreviousConversations)
+	evo.Patch("/api/agent/conversations/:id", agentController.UpdateConversationProperties)
+	evo.Put("/api/agent/conversations/:id/tags", agentController.UpdateConversationTags)
+	evo.Post("/api/agent/conversations/:id/assign", agentController.AssignConversation)
+	evo.Delete("/api/agent/conversations/:id/assign", agentController.UnassignConversation)
 
 	return nil
 }

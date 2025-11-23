@@ -3,10 +3,13 @@ package conversation
 import (
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/getevo/evo/v2"
 	"github.com/getevo/evo/v2/lib/db"
 	"github.com/getevo/evo/v2/lib/log"
+	"github.com/google/uuid"
+	"github.com/iesreza/homa-backend/apps/auth"
 	"github.com/iesreza/homa-backend/apps/models"
 	"github.com/iesreza/homa-backend/lib/response"
 )
@@ -33,15 +36,27 @@ type ConversationListItem struct {
 	Tags                 []TagInfo               `json:"tags"`
 	MessageCount         int64                   `json:"message_count"`
 	HasAttachments       bool                    `json:"has_attachments"`
+	IP                   *string                 `json:"ip"`
+	Browser              *string                 `json:"browser"`
+	OperatingSystem      *string                 `json:"operating_system"`
+}
+
+type ExternalIDInfo struct {
+	ID    uint   `json:"id"`
+	Type  string `json:"type"`
+	Value string `json:"value"`
 }
 
 type CustomerInfo struct {
-	ID         string  `json:"id"`
-	Name       string  `json:"name"`
-	Email      string  `json:"email"`
-	Phone      *string `json:"phone"`
-	AvatarURL  *string `json:"avatar_url"`
-	Initials   string  `json:"initials"`
+	ID          string           `json:"id"`
+	Name        string           `json:"name"`
+	Email       string           `json:"email"`
+	Phone       *string          `json:"phone"`
+	AvatarURL   *string          `json:"avatar_url"`
+	Initials    string           `json:"initials"`
+	ExternalIDs []ExternalIDInfo `json:"external_ids"`
+	Language    *string          `json:"language"`
+	Timezone    *string          `json:"timezone"`
 }
 
 type AgentInfo struct {
@@ -213,6 +228,7 @@ func (ac AgentController) SearchConversations(req *evo.Request) interface{} {
 	var conversations []models.Conversation
 	if err := query.
 		Preload("Client").
+		Preload("Client.ExternalIDs").
 		Preload("Department").
 		Preload("Channel").
 		Preload("Tags").
@@ -256,11 +272,24 @@ func (ac AgentController) SearchConversations(req *evo.Request) interface{} {
 			initials = strings.ToUpper(initials)
 		}
 
-		// Extract email and phone from client data (data is datatypes.JSON which is []byte)
+		// Extract email and phone from external IDs and build external IDs list
 		var email string
 		var phone *string
-		// We cannot directly access conv.Client.Data as a map since it's JSON type
-		// For now, leave them empty - TODO: unmarshal JSON to extract email/phone
+		externalIDs := make([]ExternalIDInfo, 0, len(conv.Client.ExternalIDs))
+		for _, extID := range conv.Client.ExternalIDs {
+			externalIDs = append(externalIDs, ExternalIDInfo{
+				ID:    extID.ID,
+				Type:  extID.Type,
+				Value: extID.Value,
+			})
+			// Extract primary email and phone
+			if extID.Type == "email" && email == "" {
+				email = extID.Value
+			} else if extID.Type == "phone" && phone == nil {
+				phoneValue := extID.Value
+				phone = &phoneValue
+			}
+		}
 
 		// Build assigned agents list
 		assignedAgents := make([]AgentInfo, 0, len(conv.Assignments))
@@ -326,18 +355,24 @@ func (ac AgentController) SearchConversations(req *evo.Request) interface{} {
 			UnreadMessagesCount: 0, // TODO: Implement unread messages tracking
 			IsAssignedToMe:      isAssignedToMe,
 			Customer: CustomerInfo{
-				ID:        conv.Client.ID.String(),
-				Name:      conv.Client.Name,
-				Email:     email,
-				Phone:     phone,
-				AvatarURL: nil,
-				Initials:  initials,
+				ID:          conv.Client.ID.String(),
+				Name:        conv.Client.Name,
+				Email:       email,
+				Phone:       phone,
+				AvatarURL:   nil,
+				Initials:    initials,
+				ExternalIDs: externalIDs,
+				Language:    conv.Client.Language,
+				Timezone:    conv.Client.Timezone,
 			},
-			AssignedAgents: assignedAgents,
-			Department:     department,
-			Tags:           tags,
-			MessageCount:   messageCount,
-			HasAttachments: false, // TODO: Check for attachments in messages
+			AssignedAgents:  assignedAgents,
+			Department:      department,
+			Tags:            tags,
+			MessageCount:    messageCount,
+			HasAttachments:  false, // TODO: Check for attachments in messages
+			IP:              conv.IP,
+			Browser:         conv.Browser,
+			OperatingSystem: conv.OperatingSystem,
 		}
 
 		conversationItems = append(conversationItems, conversation)
@@ -439,6 +474,49 @@ func (ac AgentController) GetDepartments(req *evo.Request) interface{} {
 	return response.OK(result)
 }
 
+// GetUsers handles the GET /api/agent/users endpoint
+func (ac AgentController) GetUsers(req *evo.Request) interface{} {
+	var users []auth.User
+	query := db.Model(&auth.User{}).Select("id, name, last_name, display_name, email, avatar")
+
+	// Optional search parameter
+	if search := req.Query("search").String(); search != "" {
+		query = query.Where(
+			"name LIKE ? OR last_name LIKE ? OR display_name LIKE ? OR email LIKE ?",
+			"%"+search+"%", "%"+search+"%", "%"+search+"%", "%"+search+"%",
+		)
+	}
+
+	// Get users
+	if err := query.Find(&users).Error; err != nil {
+		log.Error("Failed to get users:", err)
+		return response.Error(response.NewErrorWithDetails(response.ErrorCodeDatabaseError, "Failed to get users", 500, err.Error()))
+	}
+
+	type UserResponse struct {
+		ID          uuid.UUID `json:"id"`
+		Name        string    `json:"name"`
+		LastName    string    `json:"last_name"`
+		DisplayName string    `json:"display_name"`
+		Email       string    `json:"email"`
+		Avatar      *string   `json:"avatar"`
+	}
+
+	result := make([]UserResponse, 0, len(users))
+	for _, user := range users {
+		result = append(result, UserResponse{
+			ID:          user.UserID,
+			Name:        user.Name,
+			LastName:    user.LastName,
+			DisplayName: user.DisplayName,
+			Email:       user.Email,
+			Avatar:      user.Avatar,
+		})
+	}
+
+	return response.OK(result)
+}
+
 // GetTags handles the GET /api/agent/tags endpoint
 // @Summary Get tags list
 // @Description Get list of all available tags with usage statistics
@@ -475,6 +553,50 @@ func (ac AgentController) GetTags(req *evo.Request) interface{} {
 	}
 
 	return response.OK(result)
+}
+
+// CreateTag handles the POST /api/agent/tags endpoint
+func (ac AgentController) CreateTag(req *evo.Request) interface{} {
+	type CreateTagRequest struct {
+		Name string `json:"name" binding:"required"`
+	}
+
+	var createReq CreateTagRequest
+	if err := req.BodyParser(&createReq); err != nil {
+		return response.Error(response.NewErrorWithDetails(response.ErrorCodeInvalidInput, "Invalid request body", 400, err.Error()))
+	}
+
+	// Validate tag name
+	if createReq.Name == "" {
+		return response.Error(response.NewErrorWithDetails(response.ErrorCodeInvalidInput, "Tag name is required", 400, "Tag name cannot be empty"))
+	}
+
+	// Check if tag already exists
+	var existingTag models.Tag
+	if err := db.Where("name = ?", createReq.Name).First(&existingTag).Error; err == nil {
+		// Tag already exists, return it
+		return response.OK(map[string]interface{}{
+			"id":    existingTag.ID,
+			"name":  existingTag.Name,
+			"color": "#4ECDC4",
+		})
+	}
+
+	// Create new tag
+	tag := models.Tag{
+		Name: createReq.Name,
+	}
+
+	if err := db.Create(&tag).Error; err != nil {
+		log.Error("Failed to create tag:", err)
+		return response.Error(response.NewErrorWithDetails(response.ErrorCodeDatabaseError, "Failed to create tag", 500, err.Error()))
+	}
+
+	return response.OK(map[string]interface{}{
+		"id":    tag.ID,
+		"name":  tag.Name,
+		"color": "#4ECDC4",
+	})
 }
 
 // MessageItem represents a single message in the conversation
@@ -675,4 +797,631 @@ func (ac AgentController) GetConversationMessages(req *evo.Request) interface{} 
 	}
 
 	return response.OK(resp)
+}
+
+// ConversationDetailResponse represents the optimized response with conversation + messages
+type ConversationDetailResponse struct {
+	Conversation ConversationListItem `json:"conversation"`
+	Messages     []MessageItem        `json:"messages"`
+	Page         int                  `json:"page"`
+	Limit        int                  `json:"limit"`
+	Total        int64                `json:"total"`
+	TotalPages   int                  `json:"total_pages"`
+}
+
+// GetConversationDetail handles the GET /api/agent/conversations/{id} endpoint
+// @Summary Get conversation detail with messages (optimized single-call endpoint)
+// @Description Get complete conversation details along with messages in a single API call
+// @Tags Agent - Conversations
+// @Accept json
+// @Produce json
+// @Param id path int true "Conversation ID"
+// @Param page query int false "Page number for messages" default(1)
+// @Param limit query int false "Messages per page (max 100)" default(50)
+// @Param order query string false "Sort order for messages (asc or desc)" default(asc)
+// @Success 200 {object} ConversationDetailResponse
+// @Router /api/agent/conversations/{id} [get]
+func (ac AgentController) GetConversationDetail(req *evo.Request) interface{} {
+	// Get conversation ID from path parameter
+	conversationID := req.Param("id").Uint()
+	if conversationID == 0 {
+		return response.Error(response.NewErrorWithDetails(response.ErrorCodeInvalidInput, "Invalid conversation ID", 400, "Conversation ID must be a positive integer"))
+	}
+
+	// Get authenticated user ID (from JWT token)
+	userID := req.Get("user_id")
+	userIDStr := ""
+	if userID.String() != "" {
+		userIDStr = userID.String()
+	}
+
+	// Get conversation with all relations
+	var conv models.Conversation
+	if err := db.Where("id = ?", conversationID).
+		Preload("Client").
+		Preload("Client.ExternalIDs").
+		Preload("Department").
+		Preload("Channel").
+		Preload("Tags").
+		Preload("Assignments").
+		Preload("Assignments.User").
+		First(&conv).Error; err != nil {
+		return response.Error(response.NewErrorWithDetails(response.ErrorCodeNotFound, "Conversation not found", 404, fmt.Sprintf("No conversation exists with ID %d", conversationID)))
+	}
+
+	// Build conversation number
+	conversationNumber := fmt.Sprintf("CONV-%d", conv.ID)
+
+	// Get customer initials
+	initials := ""
+	if len(conv.Client.Name) > 0 {
+		parts := strings.Fields(conv.Client.Name)
+		if len(parts) >= 2 {
+			initials = string(parts[0][0]) + string(parts[1][0])
+		} else if len(parts) == 1 && len(parts[0]) > 0 {
+			initials = string(parts[0][0])
+		}
+		initials = strings.ToUpper(initials)
+	}
+
+	// Build assigned agents list
+	assignedAgents := make([]AgentInfo, 0, len(conv.Assignments))
+	isAssignedToMe := false
+	for _, assignment := range conv.Assignments {
+		if assignment.User != nil {
+			userIDFromAssignment := assignment.User.UserID.String()
+			assignedAgents = append(assignedAgents, AgentInfo{
+				ID:        userIDFromAssignment,
+				Name:      assignment.User.DisplayName,
+				AvatarURL: assignment.User.Avatar,
+			})
+			if userIDFromAssignment == userIDStr {
+				isAssignedToMe = true
+			}
+		}
+	}
+
+	// Build tags list
+	tags := make([]TagInfo, 0, len(conv.Tags))
+	for _, tag := range conv.Tags {
+		tags = append(tags, TagInfo{
+			ID:    tag.ID,
+			Name:  tag.Name,
+			Color: "#4ECDC4",
+		})
+	}
+
+	// Build department info
+	var department *DepartmentInfo
+	if conv.Department != nil {
+		department = &DepartmentInfo{
+			ID:   conv.Department.ID,
+			Name: conv.Department.Name,
+		}
+	}
+
+	// Get last message
+	var lastMessage models.Message
+	var hasLastMessage bool
+	if err := db.Where("conversation_id = ?", conv.ID).
+		Order("created_at DESC").
+		First(&lastMessage).Error; err == nil {
+		hasLastMessage = true
+	}
+
+	// Build last message preview
+	var lastMessageAt *string
+	var lastMessagePreview *string
+	if hasLastMessage {
+		lastMessageAt = new(string)
+		*lastMessageAt = lastMessage.CreatedAt.Format("2006-01-02T15:04:05Z07:00")
+		preview := lastMessage.Body
+		if len(preview) > 100 {
+			preview = preview[:100] + "..."
+		}
+		lastMessagePreview = &preview
+	}
+
+	// Get message count
+	var messageCount int64
+	db.Model(&models.Message{}).Where("conversation_id = ?", conv.ID).Count(&messageCount)
+
+	// Extract email and phone from external IDs and build external IDs list
+	var email string
+	var phone *string
+	externalIDs := make([]ExternalIDInfo, 0, len(conv.Client.ExternalIDs))
+	for _, extID := range conv.Client.ExternalIDs {
+		externalIDs = append(externalIDs, ExternalIDInfo{
+			ID:    extID.ID,
+			Type:  extID.Type,
+			Value: extID.Value,
+		})
+		// Extract primary email and phone
+		if extID.Type == "email" && email == "" {
+			email = extID.Value
+		} else if extID.Type == "phone" && phone == nil {
+			phoneValue := extID.Value
+			phone = &phoneValue
+		}
+	}
+
+	// Build conversation item
+	conversationItem := ConversationListItem{
+		ID:                  conv.ID,
+		ConversationNumber:  conversationNumber,
+		Title:               conv.Title,
+		Status:              conv.Status,
+		Priority:            conv.Priority,
+		Channel:             conv.ChannelID,
+		CreatedAt:           conv.CreatedAt.Format("2006-01-02T15:04:05Z07:00"),
+		UpdatedAt:           conv.UpdatedAt.Format("2006-01-02T15:04:05Z07:00"),
+		LastMessageAt:       lastMessageAt,
+		LastMessagePreview:  lastMessagePreview,
+		UnreadMessagesCount: 0,
+		IsAssignedToMe:      isAssignedToMe,
+		Customer: CustomerInfo{
+			ID:          conv.Client.ID.String(),
+			Name:        conv.Client.Name,
+			Email:       email,
+			Phone:       phone,
+			AvatarURL:   nil,
+			Initials:    initials,
+			ExternalIDs: externalIDs,
+			Language:    conv.Client.Language,
+			Timezone:    conv.Client.Timezone,
+		},
+		AssignedAgents:  assignedAgents,
+		Department:      department,
+		Tags:            tags,
+		MessageCount:    messageCount,
+		HasAttachments:  false,
+		IP:              conv.IP,
+		Browser:         conv.Browser,
+		OperatingSystem: conv.OperatingSystem,
+	}
+
+	// Get pagination parameters for messages
+	page := req.Query("page").Int()
+	if page < 1 {
+		page = 1
+	}
+	limit := req.Query("limit").Int()
+	if limit < 1 {
+		limit = 50
+	}
+	if limit > 100 {
+		limit = 100
+	}
+	offset := (page - 1) * limit
+
+	// Get sort order
+	order := req.Query("order").String()
+	if order == "" {
+		order = "asc"
+	}
+	if order != "asc" && order != "desc" {
+		order = "asc"
+	}
+
+	// Get messages
+	var messages []models.Message
+	query := db.Where("conversation_id = ?", conversationID).
+		Preload("User").
+		Preload("Client").
+		Limit(limit).
+		Offset(offset)
+
+	if order == "desc" {
+		query = query.Order("created_at DESC")
+	} else {
+		query = query.Order("created_at ASC")
+	}
+
+	if err := query.Find(&messages).Error; err != nil {
+		log.Error("Failed to get messages:", err)
+		return response.Error(response.NewErrorWithDetails(response.ErrorCodeDatabaseError, "Failed to retrieve messages", 500, err.Error()))
+	}
+
+	// Build message items
+	messageItems := make([]MessageItem, 0, len(messages))
+	for _, msg := range messages {
+		var authorID string
+		var authorName string
+		var authorType string
+		var avatarURL *string
+		var msgInitials string
+
+		isAgent := false
+		if msg.UserID != nil {
+			isAgent = true
+			authorType = "agent"
+			if msg.User != nil {
+				authorID = msg.User.UserID.String()
+				authorName = msg.User.DisplayName
+				avatarURL = msg.User.Avatar
+			}
+		} else if msg.ClientID != nil {
+			authorType = "customer"
+			if msg.Client != nil {
+				authorID = msg.Client.ID.String()
+				authorName = msg.Client.Name
+				avatarURL = nil
+			}
+		} else {
+			authorType = "system"
+			authorID = "system"
+			authorName = "System"
+			avatarURL = nil
+		}
+
+		// Generate initials
+		if len(authorName) > 0 {
+			parts := strings.Fields(authorName)
+			if len(parts) >= 2 {
+				msgInitials = string(parts[0][0]) + string(parts[1][0])
+			} else if len(parts) == 1 && len(parts[0]) > 0 {
+				msgInitials = string(parts[0][0])
+			}
+			msgInitials = strings.ToUpper(msgInitials)
+		}
+
+		messageItem := MessageItem{
+			ID:              msg.ID,
+			Body:            msg.Body,
+			IsAgent:         isAgent,
+			IsSystemMessage: msg.IsSystemMessage,
+			CreatedAt:       msg.CreatedAt.Format("2006-01-02T15:04:05Z07:00"),
+			Author: AuthorInfo{
+				ID:        authorID,
+				Name:      authorName,
+				Type:      authorType,
+				AvatarURL: avatarURL,
+				Initials:  msgInitials,
+			},
+			Attachments: []Attachment{},
+		}
+
+		messageItems = append(messageItems, messageItem)
+	}
+
+	// Calculate total pages
+	totalPages := int(messageCount) / limit
+	if int(messageCount)%limit != 0 {
+		totalPages++
+	}
+
+	// Build response
+	resp := ConversationDetailResponse{
+		Conversation: conversationItem,
+		Messages:     messageItems,
+		Page:         page,
+		Limit:        limit,
+		Total:        messageCount,
+		TotalPages:   totalPages,
+	}
+
+	return response.OK(resp)
+}
+
+// PreviousConversationItem represents a simplified conversation item for history
+type PreviousConversationItem struct {
+	ID                 uint   `json:"id"`
+	ConversationNumber string `json:"conversation_number"`
+	Title              string `json:"title"`
+	Status             string `json:"status"`
+	Priority           string `json:"priority"`
+	CreatedAt          string `json:"created_at"`
+	UpdatedAt          string `json:"updated_at"`
+}
+
+// PreviousConversationsResponse represents the response structure for previous conversations
+type PreviousConversationsResponse struct {
+	Page       int                        `json:"page"`
+	Limit      int                        `json:"limit"`
+	Total      int64                      `json:"total"`
+	TotalPages int                        `json:"total_pages"`
+	Data       []PreviousConversationItem `json:"data"`
+}
+
+// GetClientPreviousConversations handles the GET /api/agent/clients/:client_id/conversations endpoint
+func (ac AgentController) GetClientPreviousConversations(req *evo.Request) interface{} {
+	// Get client ID from path parameter
+	clientID := req.Param("client_id").String()
+	if clientID == "" {
+		return response.Error(response.NewErrorWithDetails(response.ErrorCodeInvalidInput, "client_id is required", 400, "Client ID must be provided"))
+	}
+
+	// Get pagination parameters
+	page := req.Query("page").Int()
+	if page < 1 {
+		page = 1
+	}
+
+	limit := req.Query("limit").Int()
+	if limit < 1 || limit > 100 {
+		limit = 10
+	}
+
+	offset := (page - 1) * limit
+
+	// Get current conversation ID to exclude (optional)
+	currentConversationID := req.Query("exclude_id").Uint()
+
+	// Query conversations for this client
+	var conversations []models.Conversation
+	query := db.Where("client_id = ?", clientID).
+		Order("updated_at DESC")
+
+	// Exclude current conversation if specified
+	if currentConversationID > 0 {
+		query = query.Where("id != ?", currentConversationID)
+	}
+
+	// Count total
+	var total int64
+	if err := query.Model(&models.Conversation{}).Count(&total).Error; err != nil {
+		log.Error("Failed to count client conversations: ", err)
+		return response.Error(response.NewErrorWithDetails(response.ErrorCodeDatabaseError, "Failed to count conversations", 500, err.Error()))
+	}
+
+	// Get paginated results
+	if err := query.Limit(limit).Offset(offset).Find(&conversations).Error; err != nil {
+		log.Error("Failed to fetch client conversations: ", err)
+		return response.Error(response.NewErrorWithDetails(response.ErrorCodeDatabaseError, "Failed to fetch conversations", 500, err.Error()))
+	}
+
+	// Map to response items
+	items := make([]PreviousConversationItem, 0, len(conversations))
+	for _, conv := range conversations {
+		// Build conversation number (format: CONV-{ID})
+		conversationNumber := fmt.Sprintf("CONV-%d", conv.ID)
+
+		items = append(items, PreviousConversationItem{
+			ID:                 conv.ID,
+			ConversationNumber: conversationNumber,
+			Title:              conv.Title,
+			Status:             conv.Status,
+			Priority:           conv.Priority,
+			CreatedAt:          conv.CreatedAt.Format("2006-01-02T15:04:05Z07:00"),
+			UpdatedAt:          conv.UpdatedAt.Format("2006-01-02T15:04:05Z07:00"),
+		})
+	}
+
+	// Calculate total pages
+	totalPages := int(total) / limit
+	if int(total)%limit != 0 {
+		totalPages++
+	}
+
+	resp := PreviousConversationsResponse{
+		Page:       page,
+		Limit:      limit,
+		Total:      total,
+		TotalPages: totalPages,
+		Data:       items,
+	}
+
+	return response.OK(resp)
+}
+
+// UpdateConversationRequest represents the request body for updating a conversation
+type UpdateConversationRequest struct {
+	Priority     *string `json:"priority"`
+	Status       *string `json:"status"`
+	DepartmentID *uint   `json:"department_id"`
+}
+
+// UpdateConversationProperties handles the PATCH /api/agent/conversations/:id endpoint
+func (ac AgentController) UpdateConversationProperties(req *evo.Request) interface{} {
+	// Get conversation ID
+	conversationID := req.Param("id").Uint()
+	if conversationID == 0 {
+		return response.Error(response.NewErrorWithDetails(response.ErrorCodeInvalidInput, "Invalid conversation ID", 400, "Conversation ID must be a positive integer"))
+	}
+
+	// Parse request body
+	var updateReq UpdateConversationRequest
+	if err := req.BodyParser(&updateReq); err != nil {
+		return response.Error(response.NewErrorWithDetails(response.ErrorCodeInvalidInput, "Invalid request body", 400, err.Error()))
+	}
+
+	// Find conversation
+	var conversation models.Conversation
+	if err := db.Where("id = ?", conversationID).First(&conversation).Error; err != nil {
+		return response.Error(response.NewErrorWithDetails(response.ErrorCodeNotFound, "Conversation not found", 404, fmt.Sprintf("No conversation exists with ID %d", conversationID)))
+	}
+
+	// Update fields if provided
+	updateData := make(map[string]interface{})
+
+	if updateReq.Priority != nil {
+		// Validate priority
+		validPriorities := map[string]bool{"low": true, "medium": true, "high": true, "urgent": true}
+		if !validPriorities[*updateReq.Priority] {
+			return response.Error(response.NewErrorWithDetails(response.ErrorCodeInvalidInput, "Invalid priority", 400, "Priority must be one of: low, medium, high, urgent"))
+		}
+		updateData["priority"] = *updateReq.Priority
+	}
+
+	if updateReq.Status != nil {
+		// Validate status
+		validStatuses := map[string]bool{
+			"new": true, "user_reply": true, "agent_reply": true,
+			"processing": true, "closed": true, "archived": true, "postponed": true,
+		}
+		if !validStatuses[*updateReq.Status] {
+			return response.Error(response.NewErrorWithDetails(response.ErrorCodeInvalidInput, "Invalid status", 400, "Invalid status value"))
+		}
+		updateData["status"] = *updateReq.Status
+
+		// If closing or archiving, set closed_at
+		if *updateReq.Status == "closed" || *updateReq.Status == "archived" {
+			now := time.Now()
+			updateData["closed_at"] = &now
+		}
+	}
+
+	if updateReq.DepartmentID != nil {
+		updateData["department_id"] = *updateReq.DepartmentID
+	}
+
+	// Perform update
+	if len(updateData) > 0 {
+		if err := db.Model(&conversation).Updates(updateData).Error; err != nil {
+			log.Error("Failed to update conversation: ", err)
+			return response.Error(response.NewErrorWithDetails(response.ErrorCodeDatabaseError, "Failed to update conversation", 500, err.Error()))
+		}
+	}
+
+	// Reload conversation with relations
+	if err := db.Preload("Client").Preload("Department").Preload("Tags").First(&conversation, conversationID).Error; err != nil {
+		return response.Error(response.NewErrorWithDetails(response.ErrorCodeDatabaseError, "Failed to reload conversation", 500, err.Error()))
+	}
+
+	return response.OK(map[string]interface{}{
+		"id":            conversation.ID,
+		"priority":      conversation.Priority,
+		"status":        conversation.Status,
+		"department_id": conversation.DepartmentID,
+		"updated_at":    conversation.UpdatedAt.Format("2006-01-02T15:04:05Z07:00"),
+	})
+}
+
+// UpdateTagsRequest represents the request body for updating tags
+type UpdateTagsRequest struct {
+	TagIDs []uint `json:"tag_ids"`
+}
+
+// UpdateConversationTags handles the PUT /api/agent/conversations/:id/tags endpoint
+func (ac AgentController) UpdateConversationTags(req *evo.Request) interface{} {
+	// Get conversation ID
+	conversationID := req.Param("id").Uint()
+	if conversationID == 0 {
+		return response.Error(response.NewErrorWithDetails(response.ErrorCodeInvalidInput, "Invalid conversation ID", 400, "Conversation ID must be a positive integer"))
+	}
+
+	// Parse request body
+	var tagsReq UpdateTagsRequest
+	if err := req.BodyParser(&tagsReq); err != nil {
+		return response.Error(response.NewErrorWithDetails(response.ErrorCodeInvalidInput, "Invalid request body", 400, err.Error()))
+	}
+
+	// Find conversation
+	var conversation models.Conversation
+	if err := db.Preload("Tags").Where("id = ?", conversationID).First(&conversation).Error; err != nil {
+		return response.Error(response.NewErrorWithDetails(response.ErrorCodeNotFound, "Conversation not found", 404, fmt.Sprintf("No conversation exists with ID %d", conversationID)))
+	}
+
+	// Get tags
+	var tags []models.Tag
+	if len(tagsReq.TagIDs) > 0 {
+		if err := db.Where("id IN ?", tagsReq.TagIDs).Find(&tags).Error; err != nil {
+			return response.Error(response.NewErrorWithDetails(response.ErrorCodeDatabaseError, "Failed to fetch tags", 500, err.Error()))
+		}
+	}
+
+	// Replace tags
+	if err := db.Model(&conversation).Association("Tags").Replace(tags); err != nil {
+		log.Error("Failed to update conversation tags: ", err)
+		return response.Error(response.NewErrorWithDetails(response.ErrorCodeDatabaseError, "Failed to update tags", 500, err.Error()))
+	}
+
+	// Return updated tags
+	var updatedTags []TagInfo
+	for _, tag := range tags {
+		updatedTags = append(updatedTags, TagInfo{
+			ID:   tag.ID,
+			Name: tag.Name,
+		})
+	}
+
+	return response.OK(map[string]interface{}{
+		"conversation_id": conversationID,
+		"tags":            updatedTags,
+	})
+}
+
+// AssignRequest represents the request body for assigning conversation
+type AssignRequest struct {
+	UserIDs      []string `json:"user_ids"`
+	DepartmentID *uint    `json:"department_id"`
+}
+
+// AssignConversation handles the POST /api/agent/conversations/:id/assign endpoint
+func (ac AgentController) AssignConversation(req *evo.Request) interface{} {
+	// Get conversation ID
+	conversationID := req.Param("id").Uint()
+	if conversationID == 0 {
+		return response.Error(response.NewErrorWithDetails(response.ErrorCodeInvalidInput, "Invalid conversation ID", 400, "Conversation ID must be a positive integer"))
+	}
+
+	// Parse request body
+	var assignReq AssignRequest
+	if err := req.BodyParser(&assignReq); err != nil {
+		return response.Error(response.NewErrorWithDetails(response.ErrorCodeInvalidInput, "Invalid request body", 400, err.Error()))
+	}
+
+	// Find conversation
+	var conversation models.Conversation
+	if err := db.Where("id = ?", conversationID).First(&conversation).Error; err != nil {
+		return response.Error(response.NewErrorWithDetails(response.ErrorCodeNotFound, "Conversation not found", 404, fmt.Sprintf("No conversation exists with ID %d", conversationID)))
+	}
+
+	// Clear existing assignments
+	if err := db.Where("conversation_id = ?", conversationID).Delete(&models.ConversationAssignment{}).Error; err != nil {
+		return response.Error(response.NewErrorWithDetails(response.ErrorCodeDatabaseError, "Failed to clear assignments", 500, err.Error()))
+	}
+
+	// Assign to users
+	for _, userIDStr := range assignReq.UserIDs {
+		userID, err := uuid.Parse(userIDStr)
+		if err != nil {
+			return response.Error(response.NewErrorWithDetails(response.ErrorCodeInvalidInput, "Invalid user ID", 400, err.Error()))
+		}
+
+		assignment := models.ConversationAssignment{
+			ConversationID: conversationID,
+			UserID:         &userID,
+		}
+		if err := db.Create(&assignment).Error; err != nil {
+			log.Error("Failed to assign user: ", err)
+			return response.Error(response.NewErrorWithDetails(response.ErrorCodeDatabaseError, "Failed to assign user", 500, err.Error()))
+		}
+	}
+
+	// Assign to department
+	if assignReq.DepartmentID != nil {
+		assignment := models.ConversationAssignment{
+			ConversationID: conversationID,
+			DepartmentID:   assignReq.DepartmentID,
+		}
+		if err := db.Create(&assignment).Error; err != nil {
+			log.Error("Failed to assign department: ", err)
+			return response.Error(response.NewErrorWithDetails(response.ErrorCodeDatabaseError, "Failed to assign department", 500, err.Error()))
+		}
+	}
+
+	return response.OK(map[string]interface{}{
+		"conversation_id": conversationID,
+		"assigned":        true,
+	})
+}
+
+// UnassignConversation handles the DELETE /api/agent/conversations/:id/assign endpoint
+func (ac AgentController) UnassignConversation(req *evo.Request) interface{} {
+	// Get conversation ID
+	conversationID := req.Param("id").Uint()
+	if conversationID == 0 {
+		return response.Error(response.NewErrorWithDetails(response.ErrorCodeInvalidInput, "Invalid conversation ID", 400, "Conversation ID must be a positive integer"))
+	}
+
+	// Clear all assignments
+	if err := db.Where("conversation_id = ?", conversationID).Delete(&models.ConversationAssignment{}).Error; err != nil {
+		return response.Error(response.NewErrorWithDetails(response.ErrorCodeDatabaseError, "Failed to clear assignments", 500, err.Error()))
+	}
+
+	return response.OK(map[string]interface{}{
+		"conversation_id": conversationID,
+		"unassigned":      true,
+	})
 }
