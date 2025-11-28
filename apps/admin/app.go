@@ -60,6 +60,10 @@ func (a App) Router() error {
 
 	// Client management APIs
 	evo.Get("/api/admin/clients", controller.ListClients)
+	evo.Get("/api/admin/clients/:id", controller.GetClient)
+	evo.Post("/api/admin/clients", controller.CreateClient)
+	evo.Put("/api/admin/clients/:id", controller.UpdateClient)
+	evo.Delete("/api/admin/clients/:id", controller.DeleteClient)
 	evo.Post("/api/admin/clients/merge", controller.MergeClients)
 
 	// Message management APIs
