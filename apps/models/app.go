@@ -24,6 +24,13 @@ func (a App) Register() error {
 	db.UseModel(WebhookDelivery{})
 	db.UseModel(CannedMessage{})
 
+	// Knowledge Base models for RAG
+	db.UseModel(KnowledgeBaseArticle{})
+	db.UseModel(KnowledgeBaseCategory{})
+	db.UseModel(KnowledgeBaseTag{})
+	db.UseModel(KnowledgeBaseArticleTag{})
+	db.UseModel(KnowledgeBaseChunk{})
+
 	return nil
 }
 

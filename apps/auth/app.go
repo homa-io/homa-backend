@@ -57,6 +57,15 @@ func (a App) Router() error {
 	}
 	evo.Get("/api/auth/oauth/providers", controller.GetOAuthProviders)
 
+	// User Management endpoints (admin only)
+	evo.Get("/api/admin/users", controller.ListUsers)
+	evo.Post("/api/admin/users", controller.CreateUser)
+	evo.Get("/api/admin/users/:id", controller.GetUser)
+	evo.Put("/api/admin/users/:id", controller.UpdateUser)
+	evo.Delete("/api/admin/users/:id", controller.DeleteUser)
+	evo.Post("/api/admin/users/:id/block", controller.BlockUser)
+	evo.Post("/api/admin/users/:id/unblock", controller.UnblockUser)
+
 	return nil
 }
 

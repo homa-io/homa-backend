@@ -50,6 +50,7 @@ type MicrosoftUserInfo struct {
 	Surname           string `json:"surname"`
 	Mail              string `json:"mail"`
 	UserPrincipalName string `json:"userPrincipalName"`
+	Photo             string `json:"photo,omitempty"`
 }
 
 // OAuth login response
@@ -117,6 +118,13 @@ func (c Controller) LoginHandler(request *evo.Request) any {
 		user.RecordLogin(request, false, "invalid_password")
 		invalidCredentialsErr := response.NewError(response.ErrorCodeUnauthorized, "Invalid email or password", 401)
 		return response.Error(invalidCredentialsErr)
+	}
+
+	// Check if user is blocked
+	if user.Status == UserStatusBlocked {
+		user.RecordLogin(request, false, "account_blocked")
+		blockedErr := response.NewError(response.ErrorCodeForbidden, "Your account has been blocked. Please contact an administrator.", 403)
+		return response.Error(blockedErr)
 	}
 
 	// Generate tokens
@@ -373,6 +381,12 @@ func (c Controller) GoogleOAuthCallback(req *evo.Request) interface{} {
 
 	// OAuth login successful - user found by email match
 
+	// Update avatar if not already set or if OAuth provides a new one
+	if userInfo.Picture != "" && (user.Avatar == nil || *user.Avatar == "") {
+		user.Avatar = &userInfo.Picture
+		db.Save(&user)
+	}
+
 	// Generate JWT tokens
 	accessToken, err := user.GenerateJWT()
 	if err != nil {
@@ -507,6 +521,16 @@ func (c Controller) MicrosoftOAuthCallback(req *evo.Request) interface{} {
 	}
 
 	// OAuth login successful - user found by email match
+
+	// Try to get Microsoft profile photo
+	if user.Avatar == nil || *user.Avatar == "" {
+		photoResp, err := client.Get("https://graph.microsoft.com/v1.0/me/photo/$value")
+		if err == nil && photoResp.StatusCode == 200 {
+			// Microsoft photo is binary data, we'd need to upload it somewhere
+			// For now, we'll skip this and use a placeholder or let user upload manually
+			defer photoResp.Body.Close()
+		}
+	}
 
 	// Generate JWT tokens
 	accessToken, err := user.GenerateJWT()

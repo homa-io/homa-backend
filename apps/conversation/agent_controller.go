@@ -1,6 +1,7 @@
 package conversation
 
 import (
+	"encoding/json"
 	"fmt"
 	"strings"
 	"time"
@@ -11,7 +12,9 @@ import (
 	"github.com/google/uuid"
 	"github.com/iesreza/homa-backend/apps/auth"
 	"github.com/iesreza/homa-backend/apps/models"
+	"github.com/iesreza/homa-backend/lib/imageutil"
 	"github.com/iesreza/homa-backend/lib/response"
+	"gorm.io/datatypes"
 )
 
 type AgentController struct{}
@@ -1423,5 +1426,1106 @@ func (ac AgentController) UnassignConversation(req *evo.Request) interface{} {
 	return response.OK(map[string]interface{}{
 		"conversation_id": conversationID,
 		"unassigned":      true,
+	})
+}
+
+// ===============================
+// CUSTOM ATTRIBUTE MANAGEMENT APIs
+// ===============================
+
+// ListCustomAttributes returns paginated list of custom attributes with search and filtering
+// @Summary List custom attributes
+// @Description Get a paginated list of custom attributes with optional filtering
+// @Tags Agent - Custom Attributes
+// @Accept json
+// @Produce json
+// @Param search query string false "Search in name, title, description"
+// @Param scope query string false "Filter by scope (client or conversation)"
+// @Param data_type query string false "Filter by data type (int, float, date, string)"
+// @Param visibility query string false "Filter by visibility (everyone, administrator, hidden)"
+// @Param order_by query string false "Order by field (name, title, scope, created_at)"
+// @Param page query int false "Page number" default(1)
+// @Param limit query int false "Items per page" default(20)
+// @Success 200 {object} response.Response
+// @Router /api/agent/attributes [get]
+func (ac AgentController) ListCustomAttributes(req *evo.Request) interface{} {
+	// Get pagination parameters
+	page := req.Query("page").Int()
+	if page < 1 {
+		page = 1
+	}
+
+	limit := req.Query("limit").Int()
+	if limit < 1 {
+		limit = 20
+	}
+	if limit > 100 {
+		limit = 100
+	}
+
+	offset := (page - 1) * limit
+
+	// Build query
+	query := db.Model(&models.CustomAttribute{})
+
+	// Search functionality
+	search := req.Query("search").String()
+	if search != "" {
+		searchTerm := "%" + search + "%"
+		query = query.Where("name LIKE ? OR title LIKE ? OR description LIKE ?",
+			searchTerm, searchTerm, searchTerm)
+	}
+
+	// Filter by scope
+	if scope := req.Query("scope").String(); scope != "" {
+		query = query.Where("scope = ?", scope)
+	}
+
+	// Filter by data type
+	if dataType := req.Query("data_type").String(); dataType != "" {
+		query = query.Where("data_type = ?", dataType)
+	}
+
+	// Filter by visibility
+	if visibility := req.Query("visibility").String(); visibility != "" {
+		query = query.Where("visibility = ?", visibility)
+	}
+
+	// Order by
+	orderBy := req.Query("order_by").String()
+	switch orderBy {
+	case "name":
+		query = query.Order("name ASC")
+	case "title":
+		query = query.Order("title ASC")
+	case "scope":
+		query = query.Order("scope ASC, name ASC")
+	default:
+		query = query.Order("created_at DESC")
+	}
+
+	// Get total count
+	var total int64
+	if err := query.Count(&total).Error; err != nil {
+		log.Error("Failed to count custom attributes:", err)
+		return response.Error(response.NewErrorWithDetails(response.ErrorCodeDatabaseError, "Failed to count attributes", 500, err.Error()))
+	}
+
+	// Get paginated results
+	var customAttrs []models.CustomAttribute
+	if err := query.Limit(limit).Offset(offset).Find(&customAttrs).Error; err != nil {
+		log.Error("Failed to fetch custom attributes:", err)
+		return response.Error(response.NewErrorWithDetails(response.ErrorCodeDatabaseError, "Failed to fetch attributes", 500, err.Error()))
+	}
+
+	// Calculate total pages
+	totalPages := int(total) / limit
+	if int(total)%limit != 0 {
+		totalPages++
+	}
+
+	return response.OKWithMeta(customAttrs, &response.Meta{
+		Page:       page,
+		Limit:      limit,
+		Total:      total,
+		TotalPages: totalPages,
+	})
+}
+
+// CreateCustomAttribute creates a new custom attribute
+// @Summary Create custom attribute
+// @Description Create a new custom attribute
+// @Tags Agent - Custom Attributes
+// @Accept json
+// @Produce json
+// @Param body body object true "Custom attribute data"
+// @Success 201 {object} response.Response
+// @Router /api/agent/attributes [post]
+func (ac AgentController) CreateCustomAttribute(req *evo.Request) interface{} {
+	type CreateRequest struct {
+		Scope       string  `json:"scope"`
+		Name        string  `json:"name"`
+		DataType    string  `json:"data_type"`
+		Validation  *string `json:"validation"`
+		Title       string  `json:"title"`
+		Description *string `json:"description"`
+		Visibility  string  `json:"visibility"`
+	}
+
+	var createReq CreateRequest
+	if err := req.BodyParser(&createReq); err != nil {
+		return response.Error(response.NewErrorWithDetails(response.ErrorCodeInvalidInput, "Invalid request body", 400, err.Error()))
+	}
+
+	// Validate required fields
+	if createReq.Scope == "" || createReq.Name == "" || createReq.DataType == "" || createReq.Title == "" || createReq.Visibility == "" {
+		return response.Error(response.NewErrorWithDetails(response.ErrorCodeInvalidInput, "Missing required fields", 400, "scope, name, data_type, title, and visibility are required"))
+	}
+
+	// Validate scope
+	if createReq.Scope != "client" && createReq.Scope != "conversation" {
+		return response.Error(response.NewErrorWithDetails(response.ErrorCodeInvalidInput, "Invalid scope", 400, "Scope must be 'client' or 'conversation'"))
+	}
+
+	// Validate data type
+	validDataTypes := map[string]bool{"int": true, "float": true, "date": true, "string": true}
+	if !validDataTypes[createReq.DataType] {
+		return response.Error(response.NewErrorWithDetails(response.ErrorCodeInvalidInput, "Invalid data type", 400, "Data type must be one of: int, float, date, string"))
+	}
+
+	// Validate visibility
+	validVisibilities := map[string]bool{"everyone": true, "administrator": true, "hidden": true}
+	if !validVisibilities[createReq.Visibility] {
+		return response.Error(response.NewErrorWithDetails(response.ErrorCodeInvalidInput, "Invalid visibility", 400, "Visibility must be one of: everyone, administrator, hidden"))
+	}
+
+	// Normalize name (lowercase, replace spaces with underscores)
+	name := strings.ToLower(strings.ReplaceAll(strings.TrimSpace(createReq.Name), " ", "_"))
+
+	// Validate name format (only lowercase letters and underscores)
+	if !isValidAttributeName(name) {
+		return response.Error(response.NewErrorWithDetails(response.ErrorCodeInvalidInput, "Invalid name format", 400, "Name can only contain lowercase letters and underscores"))
+	}
+
+	customAttr := models.CustomAttribute{
+		Scope:       createReq.Scope,
+		Name:        name,
+		DataType:    createReq.DataType,
+		Validation:  createReq.Validation,
+		Title:       createReq.Title,
+		Description: createReq.Description,
+		Visibility:  createReq.Visibility,
+	}
+
+	if err := db.Create(&customAttr).Error; err != nil {
+		if strings.Contains(err.Error(), "duplicate") || strings.Contains(err.Error(), "unique") || strings.Contains(err.Error(), "Duplicate") {
+			return response.Error(response.NewErrorWithDetails(response.ErrorCodeConflict, "Custom attribute with this scope and name already exists", 409, err.Error()))
+		}
+		log.Error("Failed to create custom attribute:", err)
+		return response.Error(response.NewErrorWithDetails(response.ErrorCodeDatabaseError, "Failed to create attribute", 500, err.Error()))
+	}
+
+	return response.Created(customAttr)
+}
+
+// UpdateCustomAttribute updates an existing custom attribute
+// @Summary Update custom attribute
+// @Description Update an existing custom attribute by scope and name
+// @Tags Agent - Custom Attributes
+// @Accept json
+// @Produce json
+// @Param scope path string true "Attribute scope"
+// @Param name path string true "Attribute name"
+// @Param body body object true "Custom attribute data"
+// @Success 200 {object} response.Response
+// @Router /api/agent/attributes/{scope}/{name} [put]
+func (ac AgentController) UpdateCustomAttribute(req *evo.Request) interface{} {
+	scope := req.Param("scope").String()
+	name := req.Param("name").String()
+
+	if scope == "" || name == "" {
+		return response.Error(response.NewErrorWithDetails(response.ErrorCodeInvalidInput, "Missing parameters", 400, "Scope and name are required"))
+	}
+
+	type UpdateRequest struct {
+		DataType    string  `json:"data_type"`
+		Validation  *string `json:"validation"`
+		Title       string  `json:"title"`
+		Description *string `json:"description"`
+		Visibility  string  `json:"visibility"`
+	}
+
+	var updateReq UpdateRequest
+	if err := req.BodyParser(&updateReq); err != nil {
+		return response.Error(response.NewErrorWithDetails(response.ErrorCodeInvalidInput, "Invalid request body", 400, err.Error()))
+	}
+
+	// Validate required fields
+	if updateReq.DataType == "" || updateReq.Title == "" || updateReq.Visibility == "" {
+		return response.Error(response.NewErrorWithDetails(response.ErrorCodeInvalidInput, "Missing required fields", 400, "data_type, title, and visibility are required"))
+	}
+
+	// Validate data type
+	validDataTypes := map[string]bool{"int": true, "float": true, "date": true, "string": true}
+	if !validDataTypes[updateReq.DataType] {
+		return response.Error(response.NewErrorWithDetails(response.ErrorCodeInvalidInput, "Invalid data type", 400, "Data type must be one of: int, float, date, string"))
+	}
+
+	// Validate visibility
+	validVisibilities := map[string]bool{"everyone": true, "administrator": true, "hidden": true}
+	if !validVisibilities[updateReq.Visibility] {
+		return response.Error(response.NewErrorWithDetails(response.ErrorCodeInvalidInput, "Invalid visibility", 400, "Visibility must be one of: everyone, administrator, hidden"))
+	}
+
+	// Find existing attribute
+	var customAttr models.CustomAttribute
+	if err := db.Where("scope = ? AND name = ?", scope, name).First(&customAttr).Error; err != nil {
+		return response.Error(response.NewErrorWithDetails(response.ErrorCodeNotFound, "Custom attribute not found", 404, fmt.Sprintf("No attribute found with scope '%s' and name '%s'", scope, name)))
+	}
+
+	// Update the attribute
+	if err := db.Model(&customAttr).Updates(models.CustomAttribute{
+		DataType:    updateReq.DataType,
+		Validation:  updateReq.Validation,
+		Title:       updateReq.Title,
+		Description: updateReq.Description,
+		Visibility:  updateReq.Visibility,
+	}).Error; err != nil {
+		log.Error("Failed to update custom attribute:", err)
+		return response.Error(response.NewErrorWithDetails(response.ErrorCodeDatabaseError, "Failed to update attribute", 500, err.Error()))
+	}
+
+	// Reload the attribute to get updated values
+	db.Where("scope = ? AND name = ?", scope, name).First(&customAttr)
+
+	return response.OK(customAttr)
+}
+
+// DeleteCustomAttribute deletes a custom attribute
+// @Summary Delete custom attribute
+// @Description Delete an existing custom attribute by scope and name
+// @Tags Agent - Custom Attributes
+// @Accept json
+// @Produce json
+// @Param scope path string true "Attribute scope"
+// @Param name path string true "Attribute name"
+// @Success 200 {object} response.Response
+// @Router /api/agent/attributes/{scope}/{name} [delete]
+func (ac AgentController) DeleteCustomAttribute(req *evo.Request) interface{} {
+	scope := req.Param("scope").String()
+	name := req.Param("name").String()
+
+	if scope == "" || name == "" {
+		return response.Error(response.NewErrorWithDetails(response.ErrorCodeInvalidInput, "Missing parameters", 400, "Scope and name are required"))
+	}
+
+	// Find existing attribute
+	var customAttr models.CustomAttribute
+	if err := db.Where("scope = ? AND name = ?", scope, name).First(&customAttr).Error; err != nil {
+		return response.Error(response.NewErrorWithDetails(response.ErrorCodeNotFound, "Custom attribute not found", 404, fmt.Sprintf("No attribute found with scope '%s' and name '%s'", scope, name)))
+	}
+
+	// Delete the attribute
+	if err := db.Delete(&customAttr).Error; err != nil {
+		log.Error("Failed to delete custom attribute:", err)
+		return response.Error(response.NewErrorWithDetails(response.ErrorCodeDatabaseError, "Failed to delete attribute", 500, err.Error()))
+	}
+
+	return response.OK(map[string]interface{}{
+		"message": "Custom attribute deleted successfully",
+		"scope":   scope,
+		"name":    name,
+	})
+}
+
+// AddAgentMessageRequest represents the request body for sending agent messages
+type AddAgentMessageRequest struct {
+	Body string `json:"body"`
+}
+
+// AddAgentMessage handles the POST /api/agent/conversations/:id/messages endpoint
+// @Summary Send agent message
+// @Description Send a message from an agent to a conversation
+// @Tags Agent - Conversations
+// @Accept json
+// @Produce json
+// @Param id path int true "Conversation ID"
+// @Param body body AddAgentMessageRequest true "Message content"
+// @Success 201 {object} response.Response
+// @Router /api/agent/conversations/{id}/messages [post]
+func (ac AgentController) AddAgentMessage(req *evo.Request) interface{} {
+	// Parse conversation ID
+	conversationID := req.Param("id").Uint()
+	if conversationID == 0 {
+		return response.Error(response.NewErrorWithDetails(response.ErrorCodeInvalidInput, "Invalid conversation ID", 400, "Conversation ID must be a positive integer"))
+	}
+
+	// Get authenticated agent's user ID
+	var userID uuid.UUID
+	userIDValue := req.Get("user_id")
+	if userIDValue.String() != "" {
+		parsedID, err := uuid.Parse(userIDValue.String())
+		if err == nil {
+			userID = parsedID
+		}
+	}
+
+	// If no user ID from JWT, try to get from request User
+	if userID == uuid.Nil {
+		user := req.User()
+		if user != nil && !user.Anonymous() {
+			if userModel, ok := user.(*auth.User); ok {
+				userID = userModel.UserID
+			}
+		}
+	}
+
+	// Verify conversation exists
+	var conversation models.Conversation
+	if err := db.Where("id = ?", conversationID).First(&conversation).Error; err != nil {
+		return response.Error(response.NewErrorWithDetails(response.ErrorCodeNotFound, "Conversation not found", 404, fmt.Sprintf("No conversation exists with ID %d", conversationID)))
+	}
+
+	// Parse request body
+	var input AddAgentMessageRequest
+	if err := req.BodyParser(&input); err != nil {
+		return response.Error(response.NewErrorWithDetails(response.ErrorCodeInvalidInput, "Invalid request format", 400, err.Error()))
+	}
+
+	// Validate message body
+	if strings.TrimSpace(input.Body) == "" {
+		return response.Error(response.NewErrorWithDetails(response.ErrorCodeInvalidInput, "Message body is required", 400, "Message body cannot be empty"))
+	}
+
+	// Create message with UserID (agent) as sender
+	message := models.Message{
+		ConversationID:  conversationID,
+		UserID:          &userID,
+		Body:            input.Body,
+		IsSystemMessage: false,
+	}
+
+	if err := db.Create(&message).Error; err != nil {
+		log.Error("Failed to create agent message:", err)
+		return response.Error(response.NewErrorWithDetails(response.ErrorCodeDatabaseError, "Failed to create message", 500, err.Error()))
+	}
+
+	// Load related data for response
+	if err := db.Preload("Conversation").Preload("User").First(&message, message.ID).Error; err != nil {
+		log.Warning("Failed to preload message relations:", err)
+	}
+
+	return response.Created(map[string]interface{}{
+		"message": message,
+	})
+}
+
+// Helper function to validate attribute name
+func isValidAttributeName(name string) bool {
+	if name == "" {
+		return false
+	}
+	for _, char := range name {
+		if !((char >= 'a' && char <= 'z') || char == '_') {
+			return false
+		}
+	}
+	return true
+}
+
+// ===============================
+// CANNED MESSAGES APIs
+// ===============================
+
+// ListCannedMessages returns paginated list of canned messages
+// @Summary List canned messages
+// @Description Get a paginated list of canned messages with optional filtering
+// @Tags Agent - Canned Messages
+// @Accept json
+// @Produce json
+// @Param search query string false "Search in title or message content"
+// @Param is_active query bool false "Filter by active status"
+// @Param page query int false "Page number" default(1)
+// @Param limit query int false "Items per page" default(20)
+// @Success 200 {object} response.Response
+// @Router /api/agent/canned-messages [get]
+func (ac AgentController) ListCannedMessages(req *evo.Request) interface{} {
+	// Get pagination parameters
+	page := req.Query("page").Int()
+	if page < 1 {
+		page = 1
+	}
+
+	limit := req.Query("limit").Int()
+	if limit < 1 {
+		limit = 20
+	}
+	if limit > 100 {
+		limit = 100
+	}
+
+	offset := (page - 1) * limit
+
+	// Build query
+	query := db.Model(&models.CannedMessage{})
+
+	// Search functionality
+	search := req.Query("search").String()
+	if search != "" {
+		searchTerm := "%" + search + "%"
+		query = query.Where("title LIKE ? OR message LIKE ?", searchTerm, searchTerm)
+	}
+
+	// Filter by active status
+	if isActiveStr := req.Query("is_active").String(); isActiveStr != "" {
+		isActive := isActiveStr == "true" || isActiveStr == "1"
+		query = query.Where("is_active = ?", isActive)
+	}
+
+	// Order by created_at descending
+	query = query.Order("created_at DESC")
+
+	// Get total count
+	var total int64
+	if err := query.Count(&total).Error; err != nil {
+		log.Error("Failed to count canned messages:", err)
+		return response.Error(response.NewErrorWithDetails(response.ErrorCodeDatabaseError, "Failed to count messages", 500, err.Error()))
+	}
+
+	// Get paginated results
+	var messages []models.CannedMessage
+	if err := query.Limit(limit).Offset(offset).Find(&messages).Error; err != nil {
+		log.Error("Failed to fetch canned messages:", err)
+		return response.Error(response.NewErrorWithDetails(response.ErrorCodeDatabaseError, "Failed to fetch messages", 500, err.Error()))
+	}
+
+	// Calculate total pages
+	totalPages := int(total) / limit
+	if int(total)%limit != 0 {
+		totalPages++
+	}
+
+	return response.OKWithMeta(messages, &response.Meta{
+		Page:       page,
+		Limit:      limit,
+		Total:      total,
+		TotalPages: totalPages,
+	})
+}
+
+// GetCannedMessage returns a single canned message by ID
+// @Summary Get canned message
+// @Description Get a single canned message by ID
+// @Tags Agent - Canned Messages
+// @Accept json
+// @Produce json
+// @Param id path int true "Message ID"
+// @Success 200 {object} response.Response
+// @Router /api/agent/canned-messages/{id} [get]
+func (ac AgentController) GetCannedMessage(req *evo.Request) interface{} {
+	id := req.Param("id").Uint()
+	if id == 0 {
+		return response.Error(response.NewErrorWithDetails(response.ErrorCodeInvalidInput, "Invalid message ID", 400, "Message ID must be a positive integer"))
+	}
+
+	var message models.CannedMessage
+	if err := db.Where("id = ?", id).First(&message).Error; err != nil {
+		return response.Error(response.NewErrorWithDetails(response.ErrorCodeNotFound, "Canned message not found", 404, err.Error()))
+	}
+
+	return response.OK(message)
+}
+
+// CreateCannedMessage creates a new canned message
+// @Summary Create canned message
+// @Description Create a new canned message
+// @Tags Agent - Canned Messages
+// @Accept json
+// @Produce json
+// @Param body body object true "Canned message data"
+// @Success 201 {object} response.Response
+// @Router /api/agent/canned-messages [post]
+func (ac AgentController) CreateCannedMessage(req *evo.Request) interface{} {
+	type CreateRequest struct {
+		Title    string  `json:"title"`
+		Message  string  `json:"message"`
+		Shortcut *string `json:"shortcut"`
+		IsActive *bool   `json:"is_active"`
+	}
+
+	var createReq CreateRequest
+	if err := req.BodyParser(&createReq); err != nil {
+		return response.Error(response.NewErrorWithDetails(response.ErrorCodeInvalidInput, "Invalid request body", 400, err.Error()))
+	}
+
+	// Validate required fields
+	if createReq.Title == "" {
+		return response.Error(response.NewErrorWithDetails(response.ErrorCodeInvalidInput, "Title is required", 400, "title field cannot be empty"))
+	}
+	if createReq.Message == "" {
+		return response.Error(response.NewErrorWithDetails(response.ErrorCodeInvalidInput, "Message is required", 400, "message field cannot be empty"))
+	}
+
+	// Default is_active to true if not specified
+	isActive := true
+	if createReq.IsActive != nil {
+		isActive = *createReq.IsActive
+	}
+
+	cannedMessage := models.CannedMessage{
+		Title:    createReq.Title,
+		Message:  createReq.Message,
+		Shortcut: createReq.Shortcut,
+		IsActive: isActive,
+	}
+
+	if err := db.Create(&cannedMessage).Error; err != nil {
+		if strings.Contains(err.Error(), "duplicate") || strings.Contains(err.Error(), "unique") || strings.Contains(err.Error(), "Duplicate") {
+			return response.Error(response.NewErrorWithDetails(response.ErrorCodeConflict, "A canned message with this shortcut already exists", 409, err.Error()))
+		}
+		log.Error("Failed to create canned message:", err)
+		return response.Error(response.NewErrorWithDetails(response.ErrorCodeDatabaseError, "Failed to create message", 500, err.Error()))
+	}
+
+	return response.Created(cannedMessage)
+}
+
+// UpdateCannedMessage updates an existing canned message
+// @Summary Update canned message
+// @Description Update an existing canned message by ID
+// @Tags Agent - Canned Messages
+// @Accept json
+// @Produce json
+// @Param id path int true "Message ID"
+// @Param body body object true "Canned message data"
+// @Success 200 {object} response.Response
+// @Router /api/agent/canned-messages/{id} [put]
+func (ac AgentController) UpdateCannedMessage(req *evo.Request) interface{} {
+	id := req.Param("id").Uint()
+	if id == 0 {
+		return response.Error(response.NewErrorWithDetails(response.ErrorCodeInvalidInput, "Invalid message ID", 400, "Message ID must be a positive integer"))
+	}
+
+	type UpdateRequest struct {
+		Title    string  `json:"title"`
+		Message  string  `json:"message"`
+		Shortcut *string `json:"shortcut"`
+		IsActive *bool   `json:"is_active"`
+	}
+
+	var updateReq UpdateRequest
+	if err := req.BodyParser(&updateReq); err != nil {
+		return response.Error(response.NewErrorWithDetails(response.ErrorCodeInvalidInput, "Invalid request body", 400, err.Error()))
+	}
+
+	// Validate required fields
+	if updateReq.Title == "" {
+		return response.Error(response.NewErrorWithDetails(response.ErrorCodeInvalidInput, "Title is required", 400, "title field cannot be empty"))
+	}
+	if updateReq.Message == "" {
+		return response.Error(response.NewErrorWithDetails(response.ErrorCodeInvalidInput, "Message is required", 400, "message field cannot be empty"))
+	}
+
+	// Find existing message
+	var cannedMessage models.CannedMessage
+	if err := db.Where("id = ?", id).First(&cannedMessage).Error; err != nil {
+		return response.Error(response.NewErrorWithDetails(response.ErrorCodeNotFound, "Canned message not found", 404, err.Error()))
+	}
+
+	// Update fields
+	updates := map[string]interface{}{
+		"title":    updateReq.Title,
+		"message":  updateReq.Message,
+		"shortcut": updateReq.Shortcut,
+	}
+
+	if updateReq.IsActive != nil {
+		updates["is_active"] = *updateReq.IsActive
+	}
+
+	if err := db.Model(&cannedMessage).Updates(updates).Error; err != nil {
+		if strings.Contains(err.Error(), "duplicate") || strings.Contains(err.Error(), "unique") || strings.Contains(err.Error(), "Duplicate") {
+			return response.Error(response.NewErrorWithDetails(response.ErrorCodeConflict, "A canned message with this shortcut already exists", 409, err.Error()))
+		}
+		log.Error("Failed to update canned message:", err)
+		return response.Error(response.NewErrorWithDetails(response.ErrorCodeDatabaseError, "Failed to update message", 500, err.Error()))
+	}
+
+	// Reload the message to get updated values
+	db.Where("id = ?", id).First(&cannedMessage)
+
+	return response.OK(cannedMessage)
+}
+
+// DeleteCannedMessage deletes a canned message
+// @Summary Delete canned message
+// @Description Delete an existing canned message by ID
+// @Tags Agent - Canned Messages
+// @Accept json
+// @Produce json
+// @Param id path int true "Message ID"
+// @Success 200 {object} response.Response
+// @Router /api/agent/canned-messages/{id} [delete]
+func (ac AgentController) DeleteCannedMessage(req *evo.Request) interface{} {
+	id := req.Param("id").Uint()
+	if id == 0 {
+		return response.Error(response.NewErrorWithDetails(response.ErrorCodeInvalidInput, "Invalid message ID", 400, "Message ID must be a positive integer"))
+	}
+
+	// Find existing message
+	var cannedMessage models.CannedMessage
+	if err := db.Where("id = ?", id).First(&cannedMessage).Error; err != nil {
+		return response.Error(response.NewErrorWithDetails(response.ErrorCodeNotFound, "Canned message not found", 404, err.Error()))
+	}
+
+	// Delete the message
+	if err := db.Delete(&cannedMessage).Error; err != nil {
+		log.Error("Failed to delete canned message:", err)
+		return response.Error(response.NewErrorWithDetails(response.ErrorCodeDatabaseError, "Failed to delete message", 500, err.Error()))
+	}
+
+	return response.OK(map[string]interface{}{
+		"message": "Canned message deleted successfully",
+		"id":      id,
+	})
+}
+
+// ========================
+// Client Management APIs
+// ========================
+
+// ListClients returns paginated list of clients with search and filtering
+func (c AgentController) ListClients(request *evo.Request) any {
+	// Check authentication
+	if request.User().Anonymous() {
+		return response.Error(response.ErrUnauthorized)
+	}
+
+	user := request.User().Interface().(*auth.User)
+	if user.Type != auth.UserTypeAgent && user.Type != auth.UserTypeAdministrator {
+		return response.Error(response.ErrForbidden)
+	}
+
+	var clients []models.Client
+	query := db.
+		Preload("ExternalIDs")
+
+	// Search functionality
+	search := request.Query("search").String()
+	if search != "" {
+		query = query.Where(
+			"name LIKE ? OR id IN (SELECT client_id FROM client_external_ids WHERE value LIKE ?)",
+			"%"+search+"%", "%"+search+"%",
+		)
+	}
+
+	// Sorting
+	sortBy := request.Query("sort_by").String()
+	sortOrder := request.Query("sort_order").String()
+	if sortOrder != "asc" && sortOrder != "desc" {
+		sortOrder = "desc"
+	}
+
+	switch sortBy {
+	case "name":
+		query = query.Order(fmt.Sprintf("name %s", sortOrder))
+	case "updated_at":
+		query = query.Order(fmt.Sprintf("updated_at %s", sortOrder))
+	default:
+		query = query.Order(fmt.Sprintf("created_at %s", sortOrder))
+	}
+
+	// Pagination
+	page := request.Query("page").Int()
+	if page < 1 {
+		page = 1
+	}
+	limit := request.Query("limit").Int()
+	if limit < 1 || limit > 100 {
+		limit = 20
+	}
+
+	var total int64
+	db.Model(&models.Client{}).Count(&total)
+
+	offset := (page - 1) * limit
+	query = query.Offset(offset).Limit(limit)
+
+	if err := query.Find(&clients).Error; err != nil {
+		log.Error("Failed to list clients:", err)
+		return response.Error(response.ErrInternalError)
+	}
+
+	totalPages := int(total) / limit
+	if int(total)%limit > 0 {
+		totalPages++
+	}
+
+	return response.OKWithMeta(clients, &response.Meta{
+		Page:       page,
+		Limit:      limit,
+		Total:      total,
+		TotalPages: totalPages,
+	})
+}
+
+// GetClient returns a single client by ID
+func (c AgentController) GetClient(request *evo.Request) any {
+	// Check authentication
+	if request.User().Anonymous() {
+		return response.Error(response.ErrUnauthorized)
+	}
+
+	user := request.User().Interface().(*auth.User)
+	if user.Type != auth.UserTypeAgent && user.Type != auth.UserTypeAdministrator {
+		return response.Error(response.ErrForbidden)
+	}
+
+	clientID := request.Param("id").String()
+	if clientID == "" {
+		return response.Error(response.ErrInvalidInput)
+	}
+
+	var client models.Client
+	if err := db.Preload("ExternalIDs").Where("id = ?", clientID).First(&client).Error; err != nil {
+		return response.Error(response.ErrNotFound)
+	}
+
+	return response.OK(client)
+}
+
+// CreateClient creates a new client
+func (c AgentController) CreateClient(request *evo.Request) any {
+	// Check authentication
+	if request.User().Anonymous() {
+		return response.Error(response.ErrUnauthorized)
+	}
+
+	user := request.User().Interface().(*auth.User)
+	if user.Type != auth.UserTypeAgent && user.Type != auth.UserTypeAdministrator {
+		return response.Error(response.ErrForbidden)
+	}
+
+	var req struct {
+		Name        string   `json:"name" validate:"required"`
+		Language    *string  `json:"language"`
+		Timezone    *string  `json:"timezone"`
+		ExternalIDs []struct {
+			Type  string `json:"type" validate:"required,oneof=email phone whatsapp slack telegram web chat"`
+			Value string `json:"value" validate:"required"`
+		} `json:"external_ids"`
+	}
+
+	if err := request.BodyParser(&req); err != nil {
+		return response.Error(response.ErrInvalidInput)
+	}
+
+	// Create the client
+	client := models.Client{
+		Name:     req.Name,
+		Language: req.Language,
+		Timezone: req.Timezone,
+	}
+
+	if err := db.Create(&client).Error; err != nil {
+		log.Error("Failed to create client:", err)
+		return response.Error(response.ErrInternalError)
+	}
+
+	// Create external IDs
+	for _, extID := range req.ExternalIDs {
+		externalID := models.ClientExternalID{
+			ClientID: client.ID,
+			Type:     extID.Type,
+			Value:    extID.Value,
+		}
+		if err := db.Create(&externalID).Error; err != nil {
+			log.Error("Failed to create external ID:", err)
+		}
+	}
+
+	// Reload with external IDs
+	db.Preload("ExternalIDs").First(&client, "id = ?", client.ID)
+
+	return response.OK(client)
+}
+
+// UpdateClient updates an existing client
+func (c AgentController) UpdateClient(request *evo.Request) any {
+	// Check authentication
+	if request.User().Anonymous() {
+		return response.Error(response.ErrUnauthorized)
+	}
+
+	user := request.User().Interface().(*auth.User)
+	if user.Type != auth.UserTypeAgent && user.Type != auth.UserTypeAdministrator {
+		return response.Error(response.ErrForbidden)
+	}
+
+	clientID := request.Param("id").String()
+	if clientID == "" {
+		return response.Error(response.ErrInvalidInput)
+	}
+
+	var client models.Client
+	if err := db.Where("id = ?", clientID).First(&client).Error; err != nil {
+		return response.Error(response.ErrNotFound)
+	}
+
+	var req struct {
+		Name        *string                `json:"name"`
+		Language    *string                `json:"language"`
+		Timezone    *string                `json:"timezone"`
+		Data        map[string]interface{} `json:"data"`
+		ExternalIDs []struct {
+			Type  string `json:"type" validate:"oneof=email phone whatsapp slack telegram web chat"`
+			Value string `json:"value"`
+		} `json:"external_ids"`
+	}
+
+	if err := request.BodyParser(&req); err != nil {
+		return response.Error(response.ErrInvalidInput)
+	}
+
+	// Update fields
+	if req.Name != nil {
+		client.Name = *req.Name
+	}
+	if req.Language != nil {
+		client.Language = req.Language
+	}
+	if req.Timezone != nil {
+		client.Timezone = req.Timezone
+	}
+
+	// Update data field if provided
+	if req.Data != nil {
+		dataBytes, err := json.Marshal(req.Data)
+		if err != nil {
+			log.Error("Failed to marshal data:", err)
+			return response.Error(response.ErrInvalidInput)
+		}
+		client.Data = datatypes.JSON(dataBytes)
+	}
+
+	if err := db.Save(&client).Error; err != nil {
+		log.Error("Failed to update client:", err)
+		return response.Error(response.ErrInternalError)
+	}
+
+	// Update external IDs if provided
+	if req.ExternalIDs != nil {
+		// Delete existing external IDs
+		db.Where("client_id = ?", client.ID).Delete(&models.ClientExternalID{})
+
+		// Create new ones
+		for _, extID := range req.ExternalIDs {
+			externalID := models.ClientExternalID{
+				ClientID: client.ID,
+				Type:     extID.Type,
+				Value:    extID.Value,
+			}
+			if err := db.Create(&externalID).Error; err != nil {
+				log.Error("Failed to create external ID:", err)
+			}
+		}
+	}
+
+	// Reload with external IDs
+	db.Preload("ExternalIDs").First(&client, "id = ?", client.ID)
+
+	return response.OK(client)
+}
+
+// DeleteClient deletes a client
+func (c AgentController) DeleteClient(request *evo.Request) any {
+	// Check authentication
+	if request.User().Anonymous() {
+		return response.Error(response.ErrUnauthorized)
+	}
+
+	user := request.User().Interface().(*auth.User)
+	if user.Type != auth.UserTypeAgent && user.Type != auth.UserTypeAdministrator {
+		return response.Error(response.ErrForbidden)
+	}
+
+	clientID := request.Param("id").String()
+	if clientID == "" {
+		return response.Error(response.ErrInvalidInput)
+	}
+
+	var client models.Client
+	if err := db.Where("id = ?", clientID).First(&client).Error; err != nil {
+		return response.Error(response.ErrNotFound)
+	}
+
+	// Delete external IDs first
+	db.Where("client_id = ?", client.ID).Delete(&models.ClientExternalID{})
+
+	// Delete the client
+	if err := db.Delete(&client).Error; err != nil {
+		log.Error("Failed to delete client:", err)
+		return response.Error(response.ErrInternalError)
+	}
+
+	return response.OK(map[string]interface{}{
+		"message": "Client deleted successfully",
+		"id":      clientID,
+	})
+}
+
+// UploadClientAvatar uploads and processes an avatar for a client
+func (c AgentController) UploadClientAvatar(request *evo.Request) any {
+	// Check authentication
+	if request.User().Anonymous() {
+		return response.Error(response.ErrUnauthorized)
+	}
+
+	user := request.User().Interface().(*auth.User)
+	if user.Type != auth.UserTypeAgent && user.Type != auth.UserTypeAdministrator {
+		return response.Error(response.ErrForbidden)
+	}
+
+	clientID := request.Param("id").String()
+	if clientID == "" {
+		return response.Error(response.ErrInvalidInput)
+	}
+
+	// Verify client exists
+	var client models.Client
+	if err := db.Where("id = ?", clientID).First(&client).Error; err != nil {
+		return response.Error(response.ErrNotFound)
+	}
+
+	var req struct {
+		Data string `json:"data" validate:"required"`
+	}
+
+	if err := request.BodyParser(&req); err != nil {
+		return response.Error(response.ErrInvalidInput)
+	}
+
+	if req.Data == "" {
+		return response.Error(response.ErrInvalidInput)
+	}
+
+	// Delete old avatar if exists
+	if client.Avatar != nil && *client.Avatar != "" {
+		if err := imageutil.DeleteAvatar(*client.Avatar); err != nil {
+			log.Warning("Failed to delete old avatar:", err)
+		}
+	}
+
+	// Process and save new avatar
+	avatarURL, err := imageutil.ProcessAvatarFromBase64(req.Data, "clients")
+	if err != nil {
+		log.Error("Failed to process avatar:", err)
+		return response.Error(response.ErrInternalError)
+	}
+
+	// Update client with new avatar URL
+	client.Avatar = &avatarURL
+	if err := db.Save(&client).Error; err != nil {
+		log.Error("Failed to update client avatar:", err)
+		return response.Error(response.ErrInternalError)
+	}
+
+	return response.OK(map[string]interface{}{
+		"avatar": avatarURL,
+	})
+}
+
+// DeleteClientAvatar removes the avatar from a client
+func (c AgentController) DeleteClientAvatar(request *evo.Request) any {
+	// Check authentication
+	if request.User().Anonymous() {
+		return response.Error(response.ErrUnauthorized)
+	}
+
+	user := request.User().Interface().(*auth.User)
+	if user.Type != auth.UserTypeAgent && user.Type != auth.UserTypeAdministrator {
+		return response.Error(response.ErrForbidden)
+	}
+
+	clientID := request.Param("id").String()
+	if clientID == "" {
+		return response.Error(response.ErrInvalidInput)
+	}
+
+	// Verify client exists
+	var client models.Client
+	if err := db.Where("id = ?", clientID).First(&client).Error; err != nil {
+		return response.Error(response.ErrNotFound)
+	}
+
+	// Delete avatar file if exists
+	if client.Avatar != nil && *client.Avatar != "" {
+		if err := imageutil.DeleteAvatar(*client.Avatar); err != nil {
+			log.Warning("Failed to delete avatar file:", err)
+		}
+	}
+
+	// Update client to remove avatar reference
+	client.Avatar = nil
+	if err := db.Save(&client).Error; err != nil {
+		log.Error("Failed to update client:", err)
+		return response.Error(response.ErrInternalError)
+	}
+
+	return response.OK(map[string]interface{}{
+		"message": "Avatar deleted successfully",
+	})
+}
+
+// UploadUserAvatar uploads and processes an avatar for the current user
+func (c AgentController) UploadUserAvatar(request *evo.Request) any {
+	// Check authentication
+	if request.User().Anonymous() {
+		return response.Error(response.ErrUnauthorized)
+	}
+
+	user := request.User().Interface().(*auth.User)
+
+	var req struct {
+		Data string `json:"data" validate:"required"`
+	}
+
+	if err := request.BodyParser(&req); err != nil {
+		return response.Error(response.ErrInvalidInput)
+	}
+
+	if req.Data == "" {
+		return response.Error(response.ErrInvalidInput)
+	}
+
+	// Delete old avatar if exists
+	if user.Avatar != nil && *user.Avatar != "" {
+		if err := imageutil.DeleteAvatar(*user.Avatar); err != nil {
+			log.Warning("Failed to delete old avatar:", err)
+		}
+	}
+
+	// Process and save new avatar
+	avatarURL, err := imageutil.ProcessAvatarFromBase64(req.Data, "users")
+	if err != nil {
+		log.Error("Failed to process avatar:", err)
+		return response.Error(response.ErrInternalError)
+	}
+
+	// Update user with new avatar URL
+	if err := db.Model(&auth.User{}).Where("id = ?", user.UserID).Update("avatar", avatarURL).Error; err != nil {
+		log.Error("Failed to update user avatar:", err)
+		return response.Error(response.ErrInternalError)
+	}
+
+	return response.OK(map[string]interface{}{
+		"avatar": avatarURL,
+	})
+}
+
+// DeleteUserAvatar removes the avatar from the current user
+func (c AgentController) DeleteUserAvatar(request *evo.Request) any {
+	// Check authentication
+	if request.User().Anonymous() {
+		return response.Error(response.ErrUnauthorized)
+	}
+
+	user := request.User().Interface().(*auth.User)
+
+	// Delete avatar file if exists
+	if user.Avatar != nil && *user.Avatar != "" {
+		if err := imageutil.DeleteAvatar(*user.Avatar); err != nil {
+			log.Warning("Failed to delete avatar file:", err)
+		}
+	}
+
+	// Update user to remove avatar reference
+	if err := db.Model(&auth.User{}).Where("id = ?", user.UserID).Update("avatar", nil).Error; err != nil {
+		log.Error("Failed to update user:", err)
+		return response.Error(response.ErrInternalError)
+	}
+
+	return response.OK(map[string]interface{}{
+		"message": "Avatar deleted successfully",
 	})
 }

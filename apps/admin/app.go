@@ -45,6 +45,7 @@ func (a App) Router() error {
 	evo.Get("/api/admin/users", controller.ListUsers)
 	evo.Put("/api/admin/users/:id/departments", controller.AssignUserToDepartment)
 	evo.Put("/api/admin/users/:id/block", controller.BlockUser)
+	evo.Post("/api/admin/upload/avatar", controller.UploadAvatar)
 
 	// Custom attribute management APIs
 	evo.Post("/api/admin/attributes", controller.CreateCustomAttribute)

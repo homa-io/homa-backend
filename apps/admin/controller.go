@@ -11,6 +11,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/iesreza/homa-backend/apps/auth"
 	"github.com/iesreza/homa-backend/apps/models"
+	"github.com/iesreza/homa-backend/lib/imageutil"
 	"github.com/iesreza/homa-backend/lib/response"
 	"gorm.io/gorm"
 )
@@ -974,6 +975,32 @@ func (c Controller) EditUser(request *evo.Request) any {
 	return response.OK(user)
 }
 
+// UploadAvatar handles avatar file upload with automatic resizing
+func (c Controller) UploadAvatar(request *evo.Request) any {
+	var req struct {
+		Data string `json:"data" validate:"required"`
+	}
+
+	if err := request.BodyParser(&req); err != nil {
+		return response.Error(response.ErrInvalidInput)
+	}
+
+	if req.Data == "" {
+		return response.Error(response.ErrInvalidInput)
+	}
+
+	// Process and save avatar using imageutil (automatically resizes to 64x64)
+	avatarURL, err := imageutil.ProcessAvatarFromBase64(req.Data, "users")
+	if err != nil {
+		return response.Error(response.ErrInternalError)
+	}
+
+	// Return the URL path
+	return response.OK(map[string]string{
+		"url": avatarURL,
+	})
+}
+
 // ListUsers returns paginated list of users with search and filtering
 func (c Controller) ListUsers(request *evo.Request) any {
 	var users []auth.User
@@ -1157,7 +1184,7 @@ func (c Controller) BlockUser(request *evo.Request) any {
 // CreateCustomAttribute creates a new custom attribute
 func (c Controller) CreateCustomAttribute(request *evo.Request) any {
 	var req struct {
-		Scope       string  `json:"scope" validate:"required,oneof=client ticket"`
+		Scope       string  `json:"scope" validate:"required,oneof=client conversation"`
 		Name        string  `json:"name" validate:"required,min=1,max=100"`
 		DataType    string  `json:"data_type" validate:"required,oneof=int float date string"`
 		Validation  *string `json:"validation"`

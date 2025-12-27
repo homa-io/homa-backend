@@ -22,6 +22,7 @@ const (
 type Client struct {
 	ID        uuid.UUID      `gorm:"column:id;type:char(36);primaryKey" json:"id"`
 	Name      string         `gorm:"column:name;size:255;not null" json:"name"`
+	Avatar    *string        `gorm:"column:avatar;size:500" json:"avatar"`
 	Data      datatypes.JSON `gorm:"column:data;type:json" json:"data"`
 	Language  *string        `gorm:"column:language;size:10" json:"language"`
 	Timezone  *string        `gorm:"column:timezone;size:50" json:"timezone"`

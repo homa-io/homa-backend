@@ -55,6 +55,7 @@ func (a App) Router() error {
 
 	// Serve static files
 	evo.Static("/static", "./static")
+	evo.Static("/uploads", "./uploads")
 	BasePath = settings.Get("APP.BASE_PATH", "http://localhost:8000").String()
 
 	// Agent dashboard
