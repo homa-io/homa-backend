@@ -943,7 +943,7 @@ func (c Controller) EditUser(request *evo.Request) any {
 	}
 
 	if req.Avatar != nil {
-		updates["avatar"] = req.Avatar
+		updates["avatar"] = *req.Avatar
 	}
 
 	// Update password if provided

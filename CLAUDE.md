@@ -8,22 +8,50 @@ This is **Homa**, an intelligent support system built with the Evo v2 framework.
 
 ## Essential Commands
 
-### Running the Application
-```bash
-# Run the application (starts HTTP server on port 8000)
-go run main.go
+### Running as a Systemd Service (Production)
 
-# Run with specific config file
-go run main.go -c config.dev.yml
+This project runs as a systemd service. Use these commands to manage it:
+
+```bash
+# Start the service
+sudo systemctl start homa-backend.service
+
+# Stop the service
+sudo systemctl stop homa-backend.service
+
+# Restart the service (rebuilds and restarts)
+sudo systemctl restart homa-backend.service
+
+# Check status
+sudo systemctl status homa-backend.service
+
+# View logs
+sudo journalctl -u homa-backend.service -f
+
+# View recent logs
+sudo journalctl -u homa-backend.service -n 100 --no-pager
+```
+
+The service automatically:
+1. Runs `go build -o homa-backend main.go` to compile the application
+2. Runs `./homa-backend -c /home/evo/config/homa-backend/config.yml`
+3. Restarts on failure
+4. Starts on system boot
+5. Listens on port 8033
+
+**Related Service**: The dashboard frontend runs as `homa-dashboard.service` on port 3000.
+
+### Running Manually (Development)
+```bash
+# Run the application (starts HTTP server on port 8033)
+go run main.go -c /home/evo/config/homa-backend/config.yml
 
 # Run with database migration
-go run main.go --migration-do
-
-# Run with dev config and migration
-go run main.go -c config.dev.yml --migration-do
+go run main.go -c /home/evo/config/homa-backend/config.yml --migration-do
 
 # Build the application
-go build -o homa main.go
+go build -o homa-backend main.go
+./homa-backend -c /home/evo/config/homa-backend/config.yml
 ```
 
 ### Development Commands
