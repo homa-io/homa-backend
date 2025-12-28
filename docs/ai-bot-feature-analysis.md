@@ -3349,7 +3349,1716 @@ The system integrates naturally with Homa's existing event-driven architecture v
 
 ---
 
-*Document Version: 1.0*
+## 14. Implementation Guide for Claude Code
+
+This section provides step-by-step instructions for implementing the AI bot feature. Follow these phases in order.
+
+### 14.1 Prerequisites
+
+Before starting implementation, ensure:
+
+```bash
+# 1. Qdrant is running (Docker)
+docker run -p 6333:6333 -p 6334:6334 qdrant/qdrant
+
+# 2. Redis is running (Docker or native)
+docker run -p 6379:6379 redis:alpine
+
+# 3. OpenAI API key is available in config
+```
+
+**Required Go Dependencies** (add to go.mod):
+
+```bash
+go get github.com/tmc/langchaingo
+go get github.com/qdrant/go-client
+go get github.com/pemistahl/lingua-go
+go get github.com/dop251/goja
+go get github.com/dop251/goja_nodejs
+go get github.com/redis/go-redis/v9
+go get github.com/jaytaylor/html2text
+go get github.com/yuin/goldmark
+go get github.com/pkoukk/tiktoken-go
+```
+
+### 14.2 File Structure
+
+Create the following file structure in `apps/ai/`:
+
+```
+apps/ai/
+├── app.go                  # App registration (EXISTS - extend it)
+├── config.go               # Configuration loader
+├── models.go               # All database models
+├── controller.go           # HTTP API handlers
+├── routes.go               # Route definitions
+│
+├── llm/
+│   ├── client.go           # LangChainGo LLM client wrapper
+│   ├── prompts.go          # System prompt templates
+│   └── memory.go           # Conversation memory management
+│
+├── kb/
+│   ├── indexer.go          # KB article indexing to Qdrant
+│   ├── chunker.go          # Text chunking logic
+│   ├── search.go           # Vector search/RAG retrieval
+│   └── sync.go             # Batch sync API
+│
+├── translation/
+│   ├── detector.go         # Language detection (lingua-go)
+│   ├── translator.go       # GPT translation service
+│   └── cache.go            # Redis translation cache
+│
+├── jsfunc/
+│   ├── runtime.go          # Goja JS runtime manager
+│   ├── executor.go         # Function execution with timeout
+│   ├── sandbox.go          # Security sandbox configuration
+│   └── library.go          # External library loader
+│
+├── workflow/
+│   ├── engine.go           # Workflow execution engine
+│   ├── parser.go           # JSON workflow parser
+│   └── nodes.go            # Node type implementations
+│
+├── handover/
+│   ├── detector.go         # Handover trigger detection
+│   ├── handler.go          # Handover execution logic
+│   └── notification.go     # Agent notification via NATS
+│
+├── budget/
+│   ├── tracker.go          # Token/cost tracking
+│   └── limiter.go          # Budget enforcement
+│
+└── cache/
+    ├── redis.go            # Redis client wrapper
+    └── invalidation.go     # NATS cache invalidation
+```
+
+### 14.3 Implementation Phases
+
+#### PHASE 1: Core Infrastructure (Implement First)
+
+**Order**: config → models → cache → app registration
+
+##### Step 1.1: Configuration (`apps/ai/config.go`)
+
+```go
+package ai
+
+import (
+    "github.com/getevo/evo/v2/lib/settings"
+)
+
+type Config struct {
+    OpenAI       OpenAIConfig
+    Qdrant       QdrantConfig
+    Redis        RedisConfig
+    GlobalEnabled bool
+}
+
+type OpenAIConfig struct {
+    APIKey        string
+    Model         string // default: gpt-4-turbo
+    EmbeddingModel string // default: text-embedding-3-small
+    MaxTokens     int    // default: 4096
+}
+
+type QdrantConfig struct {
+    Host       string
+    Port       int
+    Collection string // default: homa_kb
+}
+
+type RedisConfig struct {
+    Host     string
+    Port     int
+    Password string
+    DB       int
+}
+
+var cfg *Config
+
+func LoadConfig() *Config {
+    if cfg != nil {
+        return cfg
+    }
+
+    cfg = &Config{
+        GlobalEnabled: settings.Get("AI.ENABLED").Bool(),
+        OpenAI: OpenAIConfig{
+            APIKey:         settings.Get("AI.OPENAI_API_KEY").String(),
+            Model:          settings.Get("AI.OPENAI_MODEL").StringOr("gpt-4-turbo"),
+            EmbeddingModel: settings.Get("AI.EMBEDDING_MODEL").StringOr("text-embedding-3-small"),
+            MaxTokens:      settings.Get("AI.MAX_TOKENS").IntOr(4096),
+        },
+        Qdrant: QdrantConfig{
+            Host:       settings.Get("AI.QDRANT_HOST").StringOr("localhost"),
+            Port:       settings.Get("AI.QDRANT_PORT").IntOr(6334),
+            Collection: settings.Get("AI.QDRANT_COLLECTION").StringOr("homa_kb"),
+        },
+        Redis: RedisConfig{
+            Host:     settings.Get("AI.REDIS_HOST").StringOr("localhost"),
+            Port:     settings.Get("AI.REDIS_PORT").IntOr(6379),
+            Password: settings.Get("AI.REDIS_PASSWORD").String(),
+            DB:       settings.Get("AI.REDIS_DB").IntOr(0),
+        },
+    }
+    return cfg
+}
+```
+
+##### Step 1.2: Database Models (`apps/ai/models.go`)
+
+```go
+package ai
+
+import (
+    "time"
+    "github.com/getevo/restify"
+    "gorm.io/datatypes"
+)
+
+// AIConfiguration - Per-department AI settings
+type AIConfiguration struct {
+    restify.API
+    ID                    uint           `gorm:"primaryKey" json:"id"`
+    DepartmentID          *uint          `gorm:"index;uniqueIndex:idx_dept_ai" json:"department_id"` // nil = global default
+    GlobalEnabled         bool           `gorm:"default:true" json:"global_enabled"`
+    Enabled               bool           `gorm:"default:true" json:"enabled"`
+    SystemPromptTemplate  string         `gorm:"type:text" json:"system_prompt_template"`
+    Tone                  string         `gorm:"type:varchar(50);default:'professional'" json:"tone"` // professional, friendly, formal
+    ResponseStyle         string         `gorm:"type:varchar(50);default:'concise'" json:"response_style"` // concise, detailed
+    MaxResponseTokens     int            `gorm:"default:1000" json:"max_response_tokens"`
+    Temperature           float32        `gorm:"default:0.7" json:"temperature"`
+    KnowledgeBaseIDs      datatypes.JSON `gorm:"type:json" json:"knowledge_base_ids"` // []uint - which KBs to search
+    EnabledJSFuncIDs      datatypes.JSON `gorm:"type:json" json:"enabled_jsfunc_ids"` // []uint - allowed functions
+    EnabledWorkflowIDs    datatypes.JSON `gorm:"type:json" json:"enabled_workflow_ids"`
+    CreatedAt             time.Time      `json:"created_at"`
+    UpdatedAt             time.Time      `json:"updated_at"`
+}
+
+func (AIConfiguration) TableName() string { return "ai_configurations" }
+
+// AIBudgetConfig - Cost limits per conversation/department
+type AIBudgetConfig struct {
+    restify.API
+    ID                     uint    `gorm:"primaryKey" json:"id"`
+    DepartmentID           *uint   `gorm:"index;uniqueIndex:idx_dept_budget" json:"department_id"`
+    MaxTokensPerConversation int   `gorm:"default:50000" json:"max_tokens_per_conversation"`
+    MaxCostPerConversation float64 `gorm:"default:1.00" json:"max_cost_per_conversation"` // USD
+    MaxTokensPerDay        int     `gorm:"default:1000000" json:"max_tokens_per_day"`
+    MaxCostPerDay          float64 `gorm:"default:100.00" json:"max_cost_per_day"`
+    HandoverOnBudgetExceeded bool  `gorm:"default:true" json:"handover_on_budget_exceeded"`
+    CreatedAt              time.Time `json:"created_at"`
+    UpdatedAt              time.Time `json:"updated_at"`
+}
+
+func (AIBudgetConfig) TableName() string { return "ai_budget_configs" }
+
+// AITimeoutConfig - Timeout settings
+type AITimeoutConfig struct {
+    restify.API
+    ID                  uint  `gorm:"primaryKey" json:"id"`
+    DepartmentID        *uint `gorm:"index;uniqueIndex:idx_dept_timeout" json:"department_id"`
+    MaxWaitTimeSeconds  int   `gorm:"default:120" json:"max_wait_time_seconds"` // Max time waiting for user
+    MaxTurnsBeforeHandover int `gorm:"default:10" json:"max_turns_before_handover"`
+    InactivityTimeoutSeconds int `gorm:"default:300" json:"inactivity_timeout_seconds"`
+    HandoverOnTimeout   bool  `gorm:"default:true" json:"handover_on_timeout"`
+    CreatedAt           time.Time `json:"created_at"`
+    UpdatedAt           time.Time `json:"updated_at"`
+}
+
+func (AITimeoutConfig) TableName() string { return "ai_timeout_configs" }
+
+// AIConversationState - Active AI conversation tracking
+type AIConversationState struct {
+    restify.API
+    ID                string         `gorm:"type:varchar(36);primaryKey" json:"id"` // UUID
+    ConversationID    uint           `gorm:"index;not null" json:"conversation_id"`
+    Status            string         `gorm:"type:varchar(20);default:'active'" json:"status"` // active, handed_over, completed
+    DetectedLanguage  string         `gorm:"type:varchar(10)" json:"detected_language"` // ISO 639-1
+    TurnCount         int            `gorm:"default:0" json:"turn_count"`
+    TotalInputTokens  int            `gorm:"default:0" json:"total_input_tokens"`
+    TotalOutputTokens int            `gorm:"default:0" json:"total_output_tokens"`
+    TotalCost         float64        `gorm:"default:0" json:"total_cost"`
+    CurrentWorkflowID *uint          `json:"current_workflow_id"`
+    WorkflowState     datatypes.JSON `gorm:"type:json" json:"workflow_state"` // Current node, variables
+    LastActivityAt    time.Time      `json:"last_activity_at"`
+    HandoverReason    string         `gorm:"type:varchar(100)" json:"handover_reason"`
+    HandoverAt        *time.Time     `json:"handover_at"`
+    CreatedAt         time.Time      `json:"created_at"`
+    UpdatedAt         time.Time      `json:"updated_at"`
+}
+
+func (AIConversationState) TableName() string { return "ai_conversation_states" }
+
+// AIMessage - AI message history for context
+type AIMessage struct {
+    ID               uint      `gorm:"primaryKey" json:"id"`
+    ConversationStateID string `gorm:"type:varchar(36);index" json:"conversation_state_id"`
+    Role             string    `gorm:"type:varchar(20)" json:"role"` // user, assistant, system, function
+    Content          string    `gorm:"type:text" json:"content"`
+    FunctionName     string    `gorm:"type:varchar(100)" json:"function_name"`
+    FunctionArgs     string    `gorm:"type:text" json:"function_args"`
+    TokenCount       int       `json:"token_count"`
+    CreatedAt        time.Time `json:"created_at"`
+}
+
+func (AIMessage) TableName() string { return "ai_messages" }
+
+// JSFunc - JavaScript function definitions
+type JSFunc struct {
+    restify.API
+    ID              uint           `gorm:"primaryKey" json:"id"`
+    Name            string         `gorm:"type:varchar(100);uniqueIndex" json:"name"`
+    DisplayName     string         `gorm:"type:varchar(200)" json:"display_name"`
+    Description     string         `gorm:"type:text" json:"description"` // For AI to understand when to use
+    Code            string         `gorm:"type:text" json:"code"`
+    InputSchema     datatypes.JSON `gorm:"type:json" json:"input_schema"`  // JSON Schema for parameters
+    OutputSchema    datatypes.JSON `gorm:"type:json" json:"output_schema"` // Expected output format
+    TimeoutMs       int            `gorm:"default:5000" json:"timeout_ms"`
+    Enabled         bool           `gorm:"default:true" json:"enabled"`
+    RequiredLibraries datatypes.JSON `gorm:"type:json" json:"required_libraries"` // []uint - JSLibrary IDs
+    CreatedAt       time.Time      `json:"created_at"`
+    UpdatedAt       time.Time      `json:"updated_at"`
+}
+
+func (JSFunc) TableName() string { return "js_funcs" }
+
+// JSLibrary - External JavaScript libraries
+type JSLibrary struct {
+    restify.API
+    ID          uint      `gorm:"primaryKey" json:"id"`
+    Name        string    `gorm:"type:varchar(100);uniqueIndex" json:"name"`
+    Version     string    `gorm:"type:varchar(50)" json:"version"`
+    Description string    `gorm:"type:text" json:"description"`
+    Code        string    `gorm:"type:longtext" json:"code"` // Bundled JS code
+    SourceURL   string    `gorm:"type:varchar(500)" json:"source_url"` // npm package or URL
+    Enabled     bool      `gorm:"default:true" json:"enabled"`
+    CreatedAt   time.Time `json:"created_at"`
+    UpdatedAt   time.Time `json:"updated_at"`
+}
+
+func (JSLibrary) TableName() string { return "js_libraries" }
+
+// JSFuncTriggerRule - When functions can be called
+type JSFuncTriggerRule struct {
+    restify.API
+    ID           uint           `gorm:"primaryKey" json:"id"`
+    JSFuncID     uint           `gorm:"index" json:"jsfunc_id"`
+    RuleType     string         `gorm:"type:varchar(50)" json:"rule_type"` // always, keyword, intent, workflow_only
+    Condition    datatypes.JSON `gorm:"type:json" json:"condition"` // Rule-specific config
+    Priority     int            `gorm:"default:0" json:"priority"`
+    Enabled      bool           `gorm:"default:true" json:"enabled"`
+    CreatedAt    time.Time      `json:"created_at"`
+}
+
+func (JSFuncTriggerRule) TableName() string { return "js_func_trigger_rules" }
+
+// AIWorkflow - Visual workflow definitions
+type AIWorkflow struct {
+    restify.API
+    ID          uint           `gorm:"primaryKey" json:"id"`
+    Name        string         `gorm:"type:varchar(200);uniqueIndex" json:"name"`
+    Description string         `gorm:"type:text" json:"description"`
+    Definition  datatypes.JSON `gorm:"type:json" json:"definition"` // Full workflow JSON
+    TriggerType string         `gorm:"type:varchar(50)" json:"trigger_type"` // keyword, intent, manual, always
+    TriggerConfig datatypes.JSON `gorm:"type:json" json:"trigger_config"`
+    Enabled     bool           `gorm:"default:true" json:"enabled"`
+    CreatedAt   time.Time      `json:"created_at"`
+    UpdatedAt   time.Time      `json:"updated_at"`
+}
+
+func (AIWorkflow) TableName() string { return "ai_workflows" }
+
+// KnowledgeBaseVector - Vector embedding reference (stored in Qdrant)
+type KnowledgeBaseVector struct {
+    ID          uint      `gorm:"primaryKey" json:"id"`
+    ArticleID   uint      `gorm:"index" json:"article_id"`
+    ChunkIndex  int       `json:"chunk_index"`
+    ChunkText   string    `gorm:"type:text" json:"chunk_text"`
+    QdrantID    string    `gorm:"type:varchar(36);index" json:"qdrant_id"` // UUID in Qdrant
+    TokenCount  int       `json:"token_count"`
+    CreatedAt   time.Time `json:"created_at"`
+}
+
+func (KnowledgeBaseVector) TableName() string { return "knowledge_base_vectors" }
+
+// AIHandoverLog - Handover event logging
+type AIHandoverLog struct {
+    ID                  uint       `gorm:"primaryKey" json:"id"`
+    ConversationStateID string     `gorm:"type:varchar(36);index" json:"conversation_state_id"`
+    ConversationID      uint       `gorm:"index" json:"conversation_id"`
+    Reason              string     `gorm:"type:varchar(100)" json:"reason"`
+    TriggerType         string     `gorm:"type:varchar(50)" json:"trigger_type"` // budget, timeout, explicit, frustration, failure
+    Details             datatypes.JSON `gorm:"type:json" json:"details"`
+    AssignedAgentID     *string    `gorm:"type:varchar(36)" json:"assigned_agent_id"`
+    AISummary           string     `gorm:"type:text" json:"ai_summary"` // AI-generated summary for agent
+    CreatedAt           time.Time  `json:"created_at"`
+}
+
+func (AIHandoverLog) TableName() string { return "ai_handover_logs" }
+```
+
+##### Step 1.3: Redis Cache (`apps/ai/cache/redis.go`)
+
+```go
+package cache
+
+import (
+    "context"
+    "encoding/json"
+    "fmt"
+    "time"
+
+    "github.com/redis/go-redis/v9"
+    "github.com/iesreza/homa-backend/apps/ai"
+)
+
+var Client *redis.Client
+
+func Initialize() error {
+    cfg := ai.LoadConfig()
+
+    Client = redis.NewClient(&redis.Options{
+        Addr:     fmt.Sprintf("%s:%d", cfg.Redis.Host, cfg.Redis.Port),
+        Password: cfg.Redis.Password,
+        DB:       cfg.Redis.DB,
+    })
+
+    ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+    defer cancel()
+
+    return Client.Ping(ctx).Err()
+}
+
+// Translation cache
+func GetTranslation(ctx context.Context, textHash, targetLang string) (string, bool) {
+    key := fmt.Sprintf("trans:%s:%s", textHash, targetLang)
+    result, err := Client.Get(ctx, key).Result()
+    if err == redis.Nil {
+        return "", false
+    }
+    if err != nil {
+        return "", false
+    }
+    return result, true
+}
+
+func SetTranslation(ctx context.Context, textHash, targetLang, translation string, ttl time.Duration) error {
+    key := fmt.Sprintf("trans:%s:%s", textHash, targetLang)
+    return Client.Set(ctx, key, translation, ttl).Err()
+}
+
+// Generic cache helpers
+func Get[T any](ctx context.Context, key string) (*T, bool) {
+    result, err := Client.Get(ctx, key).Result()
+    if err != nil {
+        return nil, false
+    }
+    var value T
+    if err := json.Unmarshal([]byte(result), &value); err != nil {
+        return nil, false
+    }
+    return &value, true
+}
+
+func Set(ctx context.Context, key string, value interface{}, ttl time.Duration) error {
+    data, err := json.Marshal(value)
+    if err != nil {
+        return err
+    }
+    return Client.Set(ctx, key, data, ttl).Err()
+}
+
+func Delete(ctx context.Context, keys ...string) error {
+    return Client.Del(ctx, keys...).Err()
+}
+```
+
+##### Step 1.4: App Registration (`apps/ai/app.go`)
+
+```go
+package ai
+
+import (
+    "github.com/getevo/evo/v2"
+    "github.com/getevo/evo/v2/lib/db"
+    "github.com/iesreza/homa-backend/apps/ai/cache"
+)
+
+type App struct{}
+
+func (App) Register() {
+    // Load configuration
+    LoadConfig()
+
+    // Register models for migration
+    db.UseModel(
+        &AIConfiguration{},
+        &AIBudgetConfig{},
+        &AITimeoutConfig{},
+        &AIConversationState{},
+        &AIMessage{},
+        &JSFunc{},
+        &JSLibrary{},
+        &JSFuncTriggerRule{},
+        &AIWorkflow{},
+        &KnowledgeBaseVector{},
+        &AIHandoverLog{},
+    )
+}
+
+func (App) Router() {
+    RegisterRoutes()
+}
+
+func (App) WhenReady() {
+    // Initialize Redis
+    if err := cache.Initialize(); err != nil {
+        evo.GetLogger().Error("Failed to initialize Redis for AI:", err)
+    }
+
+    // Initialize LLM client
+    if err := InitializeLLM(); err != nil {
+        evo.GetLogger().Error("Failed to initialize LLM:", err)
+    }
+
+    // Initialize Qdrant
+    if err := InitializeQdrant(); err != nil {
+        evo.GetLogger().Error("Failed to initialize Qdrant:", err)
+    }
+
+    // Initialize language detector
+    InitializeLanguageDetector()
+
+    // Subscribe to NATS for cache invalidation
+    SubscribeCacheInvalidation()
+}
+
+func (App) Name() string {
+    return "ai"
+}
+```
+
+---
+
+#### PHASE 2: LLM Integration
+
+**Order**: client → prompts → memory
+
+##### Step 2.1: LangChainGo Client (`apps/ai/llm/client.go`)
+
+```go
+package llm
+
+import (
+    "context"
+    "fmt"
+
+    "github.com/tmc/langchaingo/llms"
+    "github.com/tmc/langchaingo/llms/openai"
+    "github.com/iesreza/homa-backend/apps/ai"
+)
+
+var LLM llms.Model
+
+func Initialize() error {
+    cfg := ai.LoadConfig()
+
+    var err error
+    LLM, err = openai.New(
+        openai.WithToken(cfg.OpenAI.APIKey),
+        openai.WithModel(cfg.OpenAI.Model),
+    )
+    if err != nil {
+        return fmt.Errorf("failed to create OpenAI client: %w", err)
+    }
+
+    return nil
+}
+
+// GenerateResponse generates a response using the LLM
+func GenerateResponse(ctx context.Context, messages []llms.MessageContent, options ...llms.CallOption) (string, error) {
+    resp, err := LLM.GenerateContent(ctx, messages, options...)
+    if err != nil {
+        return "", err
+    }
+
+    if len(resp.Choices) == 0 {
+        return "", fmt.Errorf("no response from LLM")
+    }
+
+    return resp.Choices[0].Content, nil
+}
+
+// CountTokens estimates token count for text
+func CountTokens(text string) int {
+    // Use tiktoken-go for accurate counting
+    // Simplified: ~4 chars per token
+    return len(text) / 4
+}
+```
+
+##### Step 2.2: Prompt Templates (`apps/ai/llm/prompts.go`)
+
+```go
+package llm
+
+import (
+    "bytes"
+    "text/template"
+)
+
+const DefaultSystemPrompt = `You are a helpful customer support assistant for {{.CompanyName}}.
+
+Your communication style is {{.Tone}} and {{.ResponseStyle}}.
+
+{{if .KnowledgeContext}}
+Use the following knowledge base information to answer questions:
+---
+{{.KnowledgeContext}}
+---
+{{end}}
+
+Guidelines:
+- Be helpful, accurate, and concise
+- If you don't know something, say so honestly
+- If the user needs human assistance, acknowledge this
+- Respond in {{.Language}}
+
+{{if .CustomInstructions}}
+Additional Instructions:
+{{.CustomInstructions}}
+{{end}}`
+
+type PromptData struct {
+    CompanyName       string
+    Tone              string
+    ResponseStyle     string
+    Language          string
+    KnowledgeContext  string
+    CustomInstructions string
+}
+
+func BuildSystemPrompt(templateStr string, data PromptData) (string, error) {
+    if templateStr == "" {
+        templateStr = DefaultSystemPrompt
+    }
+
+    tmpl, err := template.New("system").Parse(templateStr)
+    if err != nil {
+        return "", err
+    }
+
+    var buf bytes.Buffer
+    if err := tmpl.Execute(&buf, data); err != nil {
+        return "", err
+    }
+
+    return buf.String(), nil
+}
+```
+
+---
+
+#### PHASE 3: Knowledge Base Integration
+
+**Order**: chunker → indexer → search → GORM hooks
+
+##### Step 3.1: Text Chunker (`apps/ai/kb/chunker.go`)
+
+```go
+package kb
+
+import (
+    "strings"
+    "unicode"
+
+    "github.com/pkoukk/tiktoken-go"
+)
+
+const (
+    ChunkSize    = 500  // tokens
+    ChunkOverlap = 50   // tokens
+)
+
+type Chunk struct {
+    Text       string
+    TokenCount int
+    Index      int
+}
+
+func ChunkText(text string) []Chunk {
+    // Get tokenizer
+    enc, err := tiktoken.GetEncoding("cl100k_base")
+    if err != nil {
+        // Fallback to simple word-based chunking
+        return simpleChunk(text)
+    }
+
+    tokens := enc.Encode(text, nil, nil)
+    var chunks []Chunk
+
+    for i := 0; i < len(tokens); i += ChunkSize - ChunkOverlap {
+        end := i + ChunkSize
+        if end > len(tokens) {
+            end = len(tokens)
+        }
+
+        chunkTokens := tokens[i:end]
+        chunkText := enc.Decode(chunkTokens)
+
+        chunks = append(chunks, Chunk{
+            Text:       strings.TrimSpace(chunkText),
+            TokenCount: len(chunkTokens),
+            Index:      len(chunks),
+        })
+
+        if end >= len(tokens) {
+            break
+        }
+    }
+
+    return chunks
+}
+
+func simpleChunk(text string) []Chunk {
+    words := strings.Fields(text)
+    var chunks []Chunk
+
+    wordsPerChunk := ChunkSize / 1.3 // Approximate words per token
+
+    for i := 0; i < len(words); i += int(wordsPerChunk) - int(float64(ChunkOverlap)/1.3) {
+        end := i + int(wordsPerChunk)
+        if end > len(words) {
+            end = len(words)
+        }
+
+        chunkText := strings.Join(words[i:end], " ")
+        chunks = append(chunks, Chunk{
+            Text:       chunkText,
+            TokenCount: len(strings.Fields(chunkText)),
+            Index:      len(chunks),
+        })
+
+        if end >= len(words) {
+            break
+        }
+    }
+
+    return chunks
+}
+```
+
+##### Step 3.2: KB Indexer (`apps/ai/kb/indexer.go`)
+
+```go
+package kb
+
+import (
+    "context"
+    "fmt"
+
+    "github.com/google/uuid"
+    "github.com/getevo/evo/v2/lib/db"
+    "github.com/qdrant/go-client/qdrant"
+    "github.com/tmc/langchaingo/embeddings"
+    "github.com/tmc/langchaingo/llms/openai"
+    "github.com/iesreza/homa-backend/apps/ai"
+    "github.com/iesreza/homa-backend/apps/models"
+)
+
+var (
+    qdrantClient *qdrant.Client
+    embedder     embeddings.Embedder
+)
+
+func InitializeQdrant() error {
+    cfg := ai.LoadConfig()
+
+    var err error
+    qdrantClient, err = qdrant.NewClient(&qdrant.Config{
+        Host: cfg.Qdrant.Host,
+        Port: cfg.Qdrant.Port,
+    })
+    if err != nil {
+        return err
+    }
+
+    // Create collection if not exists
+    ctx := context.Background()
+    collections, _ := qdrantClient.ListCollections(ctx)
+
+    exists := false
+    for _, c := range collections {
+        if c == cfg.Qdrant.Collection {
+            exists = true
+            break
+        }
+    }
+
+    if !exists {
+        err = qdrantClient.CreateCollection(ctx, &qdrant.CreateCollection{
+            CollectionName: cfg.Qdrant.Collection,
+            VectorsConfig: qdrant.NewVectorsConfig(&qdrant.VectorParams{
+                Size:     1536, // text-embedding-3-small dimension
+                Distance: qdrant.Distance_Cosine,
+            }),
+        })
+        if err != nil {
+            return err
+        }
+    }
+
+    // Initialize embedder
+    llm, err := openai.New(openai.WithToken(cfg.OpenAI.APIKey))
+    if err != nil {
+        return err
+    }
+    embedder, err = embeddings.NewEmbedder(llm)
+
+    return err
+}
+
+// IndexArticle indexes a KB article to Qdrant
+func IndexArticle(articleID uint) error {
+    ctx := context.Background()
+    cfg := ai.LoadConfig()
+
+    // Fetch article
+    var article models.KnowledgeBaseArticle
+    if err := db.Where("id = ?", articleID).First(&article).Error; err != nil {
+        return err
+    }
+
+    // Chunk the content
+    chunks := ChunkText(article.Title + "\n\n" + article.Content)
+
+    // Generate embeddings
+    var texts []string
+    for _, chunk := range chunks {
+        texts = append(texts, chunk.Text)
+    }
+
+    vectors, err := embedder.EmbedDocuments(ctx, texts)
+    if err != nil {
+        return err
+    }
+
+    // Upsert to Qdrant
+    var points []*qdrant.PointStruct
+    for i, chunk := range chunks {
+        pointID := uuid.New().String()
+
+        points = append(points, &qdrant.PointStruct{
+            Id:      qdrant.NewIDUUID(pointID),
+            Vectors: qdrant.NewVectors(vectors[i]...),
+            Payload: qdrant.NewValueMap(map[string]any{
+                "article_id":  articleID,
+                "chunk_index": chunk.Index,
+                "chunk_text":  chunk.Text,
+                "title":       article.Title,
+                "category_id": article.CategoryID,
+            }),
+        })
+
+        // Save reference in MySQL
+        vectorRef := ai.KnowledgeBaseVector{
+            ArticleID:  articleID,
+            ChunkIndex: chunk.Index,
+            ChunkText:  chunk.Text,
+            QdrantID:   pointID,
+            TokenCount: chunk.TokenCount,
+        }
+        db.Create(&vectorRef)
+    }
+
+    _, err = qdrantClient.Upsert(ctx, &qdrant.UpsertPoints{
+        CollectionName: cfg.Qdrant.Collection,
+        Points:         points,
+    })
+
+    return err
+}
+
+// DeleteArticleVectors removes all vectors for an article
+func DeleteArticleVectors(articleID uint) error {
+    ctx := context.Background()
+    cfg := ai.LoadConfig()
+
+    // Delete from Qdrant using filter
+    _, err := qdrantClient.Delete(ctx, &qdrant.DeletePoints{
+        CollectionName: cfg.Qdrant.Collection,
+        Points: &qdrant.PointsSelector{
+            PointsSelectorOneOf: &qdrant.PointsSelector_Filter{
+                Filter: &qdrant.Filter{
+                    Must: []*qdrant.Condition{
+                        qdrant.NewMatch("article_id", int64(articleID)),
+                    },
+                },
+            },
+        },
+    })
+    if err != nil {
+        return err
+    }
+
+    // Delete from MySQL
+    return db.Where("article_id = ?", articleID).Delete(&ai.KnowledgeBaseVector{}).Error
+}
+
+// BatchReindexAll reindexes all KB articles (maintenance function)
+func BatchReindexAll(ctx context.Context) error {
+    // Delete all existing vectors
+    cfg := ai.LoadConfig()
+    qdrantClient.Delete(ctx, &qdrant.DeletePoints{
+        CollectionName: cfg.Qdrant.Collection,
+        Points: &qdrant.PointsSelector{
+            PointsSelectorOneOf: &qdrant.PointsSelector_Filter{
+                Filter: &qdrant.Filter{}, // Match all
+            },
+        },
+    })
+    db.Where("1=1").Delete(&ai.KnowledgeBaseVector{})
+
+    // Fetch all articles
+    var articles []models.KnowledgeBaseArticle
+    if err := db.Find(&articles).Error; err != nil {
+        return err
+    }
+
+    // Index each article
+    for _, article := range articles {
+        if err := IndexArticle(article.ID); err != nil {
+            return err
+        }
+    }
+
+    return nil
+}
+```
+
+##### Step 3.3: GORM Hooks for KB Sync
+
+Add to `apps/models/knowledge_base.go`:
+
+```go
+// Add these hooks to KnowledgeBaseArticle model
+
+func (a *KnowledgeBaseArticle) AfterCreate(tx *gorm.DB) error {
+    go func() {
+        if err := kb.IndexArticle(a.ID); err != nil {
+            log.Error("Failed to index KB article", "id", a.ID, "error", err)
+        }
+    }()
+    return nil
+}
+
+func (a *KnowledgeBaseArticle) AfterUpdate(tx *gorm.DB) error {
+    go func() {
+        if err := kb.DeleteArticleVectors(a.ID); err != nil {
+            log.Error("Failed to delete old vectors", "id", a.ID, "error", err)
+        }
+        if err := kb.IndexArticle(a.ID); err != nil {
+            log.Error("Failed to re-index KB article", "id", a.ID, "error", err)
+        }
+    }()
+    return nil
+}
+
+func (a *KnowledgeBaseArticle) AfterDelete(tx *gorm.DB) error {
+    go func() {
+        if err := kb.DeleteArticleVectors(a.ID); err != nil {
+            log.Error("Failed to delete KB vectors", "id", a.ID, "error", err)
+        }
+    }()
+    return nil
+}
+```
+
+---
+
+#### PHASE 4: Language Detection & Translation
+
+##### Step 4.1: Language Detector (`apps/ai/translation/detector.go`)
+
+```go
+package translation
+
+import (
+    "github.com/pemistahl/lingua-go"
+)
+
+var detector lingua.LanguageDetector
+
+func InitializeDetector() {
+    detector = lingua.NewLanguageDetectorBuilder().
+        FromAllLanguages().
+        WithPreloadedLanguageModels().
+        Build()
+}
+
+// DetectLanguage detects the language of text
+func DetectLanguage(text string) string {
+    if len(text) < 10 {
+        return "en" // Default to English for very short text
+    }
+
+    language, exists := detector.DetectLanguageOf(text)
+    if !exists {
+        return "en"
+    }
+
+    return lingua.GetIsoCode639_1(language).String()
+}
+```
+
+##### Step 4.2: Translator with Cache (`apps/ai/translation/translator.go`)
+
+```go
+package translation
+
+import (
+    "context"
+    "crypto/sha256"
+    "encoding/hex"
+    "fmt"
+    "time"
+
+    "github.com/tmc/langchaingo/llms"
+    "github.com/iesreza/homa-backend/apps/ai/cache"
+    "github.com/iesreza/homa-backend/apps/ai/llm"
+)
+
+const TranslationCacheTTL = 24 * time.Hour
+
+// Translate translates text to target language with caching
+func Translate(ctx context.Context, text, targetLang string) (string, error) {
+    if targetLang == "en" || targetLang == "" {
+        return text, nil // No translation needed
+    }
+
+    // Check cache
+    hash := hashText(text)
+    if cached, ok := cache.GetTranslation(ctx, hash, targetLang); ok {
+        return cached, nil
+    }
+
+    // Translate via LLM
+    prompt := fmt.Sprintf(`Translate the following text to %s. Only output the translation, nothing else.
+
+Text: %s`, getLanguageName(targetLang), text)
+
+    messages := []llms.MessageContent{
+        llms.TextParts(llms.ChatMessageTypeHuman, prompt),
+    }
+
+    translated, err := llm.GenerateResponse(ctx, messages,
+        llms.WithTemperature(0.3),
+        llms.WithMaxTokens(len(text)*2),
+    )
+    if err != nil {
+        return text, err // Return original on error
+    }
+
+    // Cache the translation
+    cache.SetTranslation(ctx, hash, targetLang, translated, TranslationCacheTTL)
+
+    return translated, nil
+}
+
+func hashText(text string) string {
+    h := sha256.Sum256([]byte(text))
+    return hex.EncodeToString(h[:16]) // First 16 bytes
+}
+
+func getLanguageName(code string) string {
+    languages := map[string]string{
+        "fa": "Persian (Farsi)",
+        "ar": "Arabic",
+        "es": "Spanish",
+        "fr": "French",
+        "de": "German",
+        "zh": "Chinese",
+        "ja": "Japanese",
+        "ko": "Korean",
+        "ru": "Russian",
+        "pt": "Portuguese",
+        // Add more as needed
+    }
+    if name, ok := languages[code]; ok {
+        return name
+    }
+    return code
+}
+```
+
+---
+
+#### PHASE 5: JS Function Runtime
+
+##### Step 5.1: Goja Runtime (`apps/ai/jsfunc/runtime.go`)
+
+```go
+package jsfunc
+
+import (
+    "context"
+    "fmt"
+    "sync"
+    "time"
+
+    "github.com/dop251/goja"
+    "github.com/dop251/goja_nodejs/require"
+    "github.com/dop251/goja_nodejs/console"
+    "github.com/getevo/evo/v2/lib/db"
+    "github.com/iesreza/homa-backend/apps/ai"
+)
+
+type Runtime struct {
+    vm       *goja.Runtime
+    registry *require.Registry
+    mu       sync.Mutex
+}
+
+var runtimePool = sync.Pool{
+    New: func() interface{} {
+        return newRuntime()
+    },
+}
+
+func newRuntime() *Runtime {
+    registry := require.NewRegistry()
+    vm := goja.New()
+    registry.Enable(vm)
+    console.Enable(vm)
+
+    // Add safe globals
+    vm.Set("setTimeout", func(call goja.FunctionCall) goja.Value {
+        return goja.Undefined() // Disabled for security
+    })
+
+    return &Runtime{
+        vm:       vm,
+        registry: registry,
+    }
+}
+
+func GetRuntime() *Runtime {
+    return runtimePool.Get().(*Runtime)
+}
+
+func PutRuntime(r *Runtime) {
+    // Reset VM state before returning to pool
+    r.vm = goja.New()
+    r.registry.Enable(r.vm)
+    console.Enable(r.vm)
+    runtimePool.Put(r)
+}
+
+// ExecuteFunction runs a JS function with timeout
+func ExecuteFunction(ctx context.Context, funcID uint, input map[string]interface{}) (interface{}, error) {
+    // Load function
+    var jsFunc ai.JSFunc
+    if err := db.First(&jsFunc, funcID).Error; err != nil {
+        return nil, fmt.Errorf("function not found: %w", err)
+    }
+
+    if !jsFunc.Enabled {
+        return nil, fmt.Errorf("function is disabled")
+    }
+
+    // Get runtime from pool
+    rt := GetRuntime()
+    defer PutRuntime(rt)
+
+    rt.mu.Lock()
+    defer rt.mu.Unlock()
+
+    // Load required libraries
+    if err := loadLibraries(rt.vm, jsFunc.RequiredLibraries); err != nil {
+        return nil, fmt.Errorf("failed to load libraries: %w", err)
+    }
+
+    // Set input
+    rt.vm.Set("input", input)
+
+    // Execute with timeout
+    timeout := time.Duration(jsFunc.TimeoutMs) * time.Millisecond
+    ctx, cancel := context.WithTimeout(ctx, timeout)
+    defer cancel()
+
+    resultChan := make(chan goja.Value, 1)
+    errChan := make(chan error, 1)
+
+    go func() {
+        // Run the function code
+        _, err := rt.vm.RunString(jsFunc.Code)
+        if err != nil {
+            errChan <- err
+            return
+        }
+
+        // Call main function
+        mainFn, ok := goja.AssertFunction(rt.vm.Get("main"))
+        if !ok {
+            errChan <- fmt.Errorf("main function not found in code")
+            return
+        }
+
+        result, err := mainFn(goja.Undefined(), rt.vm.ToValue(input))
+        if err != nil {
+            errChan <- err
+            return
+        }
+        resultChan <- result
+    }()
+
+    select {
+    case <-ctx.Done():
+        rt.vm.Interrupt("execution timeout")
+        return nil, fmt.Errorf("function execution timeout")
+    case err := <-errChan:
+        return nil, err
+    case result := <-resultChan:
+        return result.Export(), nil
+    }
+}
+
+func loadLibraries(vm *goja.Runtime, libraryIDs []byte) error {
+    // Parse library IDs from JSON
+    // Load each library code and execute
+    var ids []uint
+    // json.Unmarshal(libraryIDs, &ids)
+
+    for _, id := range ids {
+        var lib ai.JSLibrary
+        if err := db.First(&lib, id).Error; err != nil {
+            continue
+        }
+        if lib.Enabled {
+            if _, err := vm.RunString(lib.Code); err != nil {
+                return err
+            }
+        }
+    }
+    return nil
+}
+```
+
+---
+
+#### PHASE 6: Handover System
+
+##### Step 6.1: Handover Detector (`apps/ai/handover/detector.go`)
+
+```go
+package handover
+
+import (
+    "context"
+    "strings"
+    "time"
+
+    "github.com/getevo/evo/v2/lib/db"
+    "github.com/iesreza/homa-backend/apps/ai"
+)
+
+type HandoverReason string
+
+const (
+    ReasonBudgetExceeded  HandoverReason = "budget_exceeded"
+    ReasonTimeout         HandoverReason = "timeout"
+    ReasonExplicitRequest HandoverReason = "explicit_request"
+    ReasonFrustration     HandoverReason = "frustration"
+    ReasonAIFailure       HandoverReason = "ai_failure"
+    ReasonWorkflowDeadEnd HandoverReason = "workflow_dead_end"
+    ReasonJSFuncFailure   HandoverReason = "jsfunc_failure"
+)
+
+// ExplicitHandoverPhrases - phrases that trigger explicit handover
+var ExplicitHandoverPhrases = []string{
+    "talk to human",
+    "speak to agent",
+    "real person",
+    "human agent",
+    "transfer me",
+    "connect me to",
+    "operator",
+    "representative",
+}
+
+// FrustrationPhrases - phrases indicating user frustration
+var FrustrationPhrases = []string{
+    "this is useless",
+    "you're not helping",
+    "stupid bot",
+    "i hate this",
+    "doesn't work",
+    "waste of time",
+}
+
+type HandoverCheck struct {
+    ShouldHandover bool
+    Reason         HandoverReason
+    Details        map[string]interface{}
+}
+
+// CheckBudget checks if budget limits are exceeded
+func CheckBudget(state *ai.AIConversationState, config *ai.AIBudgetConfig) *HandoverCheck {
+    if config == nil || !config.HandoverOnBudgetExceeded {
+        return nil
+    }
+
+    if state.TotalCost >= config.MaxCostPerConversation {
+        return &HandoverCheck{
+            ShouldHandover: true,
+            Reason:         ReasonBudgetExceeded,
+            Details: map[string]interface{}{
+                "cost":      state.TotalCost,
+                "limit":     config.MaxCostPerConversation,
+                "limit_type": "cost",
+            },
+        }
+    }
+
+    if state.TotalInputTokens+state.TotalOutputTokens >= config.MaxTokensPerConversation {
+        return &HandoverCheck{
+            ShouldHandover: true,
+            Reason:         ReasonBudgetExceeded,
+            Details: map[string]interface{}{
+                "tokens":    state.TotalInputTokens + state.TotalOutputTokens,
+                "limit":     config.MaxTokensPerConversation,
+                "limit_type": "tokens",
+            },
+        }
+    }
+
+    return nil
+}
+
+// CheckTimeout checks for timeout conditions
+func CheckTimeout(state *ai.AIConversationState, config *ai.AITimeoutConfig) *HandoverCheck {
+    if config == nil || !config.HandoverOnTimeout {
+        return nil
+    }
+
+    if state.TurnCount >= config.MaxTurnsBeforeHandover {
+        return &HandoverCheck{
+            ShouldHandover: true,
+            Reason:         ReasonTimeout,
+            Details: map[string]interface{}{
+                "turns": state.TurnCount,
+                "limit": config.MaxTurnsBeforeHandover,
+                "type":  "turn_limit",
+            },
+        }
+    }
+
+    inactivity := time.Since(state.LastActivityAt)
+    if inactivity.Seconds() > float64(config.InactivityTimeoutSeconds) {
+        return &HandoverCheck{
+            ShouldHandover: true,
+            Reason:         ReasonTimeout,
+            Details: map[string]interface{}{
+                "inactivity_seconds": inactivity.Seconds(),
+                "limit":              config.InactivityTimeoutSeconds,
+                "type":               "inactivity",
+            },
+        }
+    }
+
+    return nil
+}
+
+// CheckExplicitRequest checks if user explicitly requested human
+func CheckExplicitRequest(message string) *HandoverCheck {
+    lower := strings.ToLower(message)
+
+    for _, phrase := range ExplicitHandoverPhrases {
+        if strings.Contains(lower, phrase) {
+            return &HandoverCheck{
+                ShouldHandover: true,
+                Reason:         ReasonExplicitRequest,
+                Details: map[string]interface{}{
+                    "matched_phrase": phrase,
+                },
+            }
+        }
+    }
+
+    return nil
+}
+
+// CheckFrustration checks for user frustration
+func CheckFrustration(message string) *HandoverCheck {
+    lower := strings.ToLower(message)
+
+    for _, phrase := range FrustrationPhrases {
+        if strings.Contains(lower, phrase) {
+            return &HandoverCheck{
+                ShouldHandover: true,
+                Reason:         ReasonFrustration,
+                Details: map[string]interface{}{
+                    "indicator": phrase,
+                },
+            }
+        }
+    }
+
+    return nil
+}
+
+// ExecuteHandover performs the handover
+func ExecuteHandover(ctx context.Context, state *ai.AIConversationState, reason HandoverReason, details map[string]interface{}) error {
+    now := time.Now()
+
+    // Update state
+    state.Status = "handed_over"
+    state.HandoverReason = string(reason)
+    state.HandoverAt = &now
+    db.Save(state)
+
+    // Log handover
+    log := ai.AIHandoverLog{
+        ConversationStateID: state.ID,
+        ConversationID:      state.ConversationID,
+        Reason:              string(reason),
+        TriggerType:         string(reason),
+        Details:             details,
+    }
+    db.Create(&log)
+
+    // TODO: Notify agents via NATS
+    // TODO: Generate AI summary for agent
+
+    return nil
+}
+```
+
+---
+
+#### PHASE 7: Main Chat Handler
+
+##### Step 7.1: Chat Controller (`apps/ai/controller.go`)
+
+```go
+package ai
+
+import (
+    "context"
+
+    "github.com/getevo/evo/v2"
+    "github.com/getevo/evo/v2/lib/db"
+    "github.com/gofiber/fiber/v2"
+    "github.com/google/uuid"
+    "github.com/tmc/langchaingo/llms"
+
+    "github.com/iesreza/homa-backend/apps/ai/handover"
+    "github.com/iesreza/homa-backend/apps/ai/kb"
+    "github.com/iesreza/homa-backend/apps/ai/llm"
+    "github.com/iesreza/homa-backend/apps/ai/translation"
+)
+
+type ChatRequest struct {
+    ConversationID uint   `json:"conversation_id"`
+    Message        string `json:"message"`
+}
+
+type ChatResponse struct {
+    Response       string `json:"response"`
+    HandedOver     bool   `json:"handed_over"`
+    HandoverReason string `json:"handover_reason,omitempty"`
+}
+
+func HandleChat(c *fiber.Ctx) error {
+    var req ChatRequest
+    if err := c.BodyParser(&req); err != nil {
+        return evo.Error(c, 400, "Invalid request")
+    }
+
+    ctx := context.Background()
+
+    // Get or create conversation state
+    var state AIConversationState
+    err := db.Where("conversation_id = ? AND status = 'active'", req.ConversationID).First(&state).Error
+    if err != nil {
+        // Create new state
+        state = AIConversationState{
+            ID:             uuid.New().String(),
+            ConversationID: req.ConversationID,
+            Status:         "active",
+        }
+        db.Create(&state)
+    }
+
+    // Load configs
+    var budgetConfig AIBudgetConfig
+    var timeoutConfig AITimeoutConfig
+    db.First(&budgetConfig) // TODO: filter by department
+    db.First(&timeoutConfig)
+
+    // Check handover conditions BEFORE processing
+    if check := handover.CheckExplicitRequest(req.Message); check != nil && check.ShouldHandover {
+        handover.ExecuteHandover(ctx, &state, check.Reason, check.Details)
+        return c.JSON(ChatResponse{
+            Response:       "I'll connect you with a human agent right away.",
+            HandedOver:     true,
+            HandoverReason: string(check.Reason),
+        })
+    }
+
+    if check := handover.CheckFrustration(req.Message); check != nil && check.ShouldHandover {
+        handover.ExecuteHandover(ctx, &state, check.Reason, check.Details)
+        return c.JSON(ChatResponse{
+            Response:       "I understand you'd prefer to speak with a human. Connecting you now.",
+            HandedOver:     true,
+            HandoverReason: string(check.Reason),
+        })
+    }
+
+    if check := handover.CheckBudget(&state, &budgetConfig); check != nil && check.ShouldHandover {
+        handover.ExecuteHandover(ctx, &state, check.Reason, check.Details)
+        return c.JSON(ChatResponse{
+            Response:       "I've reached my assistance limit. A human agent will help you further.",
+            HandedOver:     true,
+            HandoverReason: string(check.Reason),
+        })
+    }
+
+    if check := handover.CheckTimeout(&state, &timeoutConfig); check != nil && check.ShouldHandover {
+        handover.ExecuteHandover(ctx, &state, check.Reason, check.Details)
+        return c.JSON(ChatResponse{
+            Response:       "Let me connect you with a human agent who can better assist you.",
+            HandedOver:     true,
+            HandoverReason: string(check.Reason),
+        })
+    }
+
+    // Detect language on first message
+    if state.DetectedLanguage == "" {
+        state.DetectedLanguage = translation.DetectLanguage(req.Message)
+        db.Save(&state)
+    }
+
+    // Search knowledge base
+    kbContext, err := kb.SearchRelevant(ctx, req.Message, 5)
+    if err != nil {
+        evo.GetLogger().Error("KB search failed:", err)
+    }
+
+    // Build system prompt
+    var aiConfig AIConfiguration
+    db.First(&aiConfig) // TODO: filter by department
+
+    systemPrompt, _ := llm.BuildSystemPrompt(aiConfig.SystemPromptTemplate, llm.PromptData{
+        CompanyName:      "Your Company", // TODO: from config
+        Tone:             aiConfig.Tone,
+        ResponseStyle:    aiConfig.ResponseStyle,
+        Language:         state.DetectedLanguage,
+        KnowledgeContext: kbContext,
+    })
+
+    // Load conversation history
+    var history []AIMessage
+    db.Where("conversation_state_id = ?", state.ID).Order("created_at").Find(&history)
+
+    // Build messages
+    messages := []llms.MessageContent{
+        llms.TextParts(llms.ChatMessageTypeSystem, systemPrompt),
+    }
+    for _, msg := range history {
+        if msg.Role == "user" {
+            messages = append(messages, llms.TextParts(llms.ChatMessageTypeHuman, msg.Content))
+        } else if msg.Role == "assistant" {
+            messages = append(messages, llms.TextParts(llms.ChatMessageTypeAI, msg.Content))
+        }
+    }
+    messages = append(messages, llms.TextParts(llms.ChatMessageTypeHuman, req.Message))
+
+    // Generate response
+    response, err := llm.GenerateResponse(ctx, messages,
+        llms.WithTemperature(float64(aiConfig.Temperature)),
+        llms.WithMaxTokens(aiConfig.MaxResponseTokens),
+    )
+    if err != nil {
+        // AI failure - handover
+        handover.ExecuteHandover(ctx, &state, handover.ReasonAIFailure, map[string]interface{}{
+            "error": err.Error(),
+        })
+        return c.JSON(ChatResponse{
+            Response:       "I'm having trouble processing your request. Let me connect you with a human agent.",
+            HandedOver:     true,
+            HandoverReason: string(handover.ReasonAIFailure),
+        })
+    }
+
+    // Translate response if needed
+    if state.DetectedLanguage != "en" {
+        response, _ = translation.Translate(ctx, response, state.DetectedLanguage)
+    }
+
+    // Save messages
+    db.Create(&AIMessage{
+        ConversationStateID: state.ID,
+        Role:                "user",
+        Content:             req.Message,
+        TokenCount:          llm.CountTokens(req.Message),
+    })
+    db.Create(&AIMessage{
+        ConversationStateID: state.ID,
+        Role:                "assistant",
+        Content:             response,
+        TokenCount:          llm.CountTokens(response),
+    })
+
+    // Update state
+    state.TurnCount++
+    state.TotalInputTokens += llm.CountTokens(req.Message)
+    state.TotalOutputTokens += llm.CountTokens(response)
+    // TODO: Calculate cost based on model pricing
+    db.Save(&state)
+
+    return c.JSON(ChatResponse{
+        Response:   response,
+        HandedOver: false,
+    })
+}
+```
+
+---
+
+### 14.4 Configuration Template
+
+Add to `config.yml`:
+
+```yaml
+AI:
+  ENABLED: true
+  OPENAI_API_KEY: "sk-..."
+  OPENAI_MODEL: "gpt-4-turbo"
+  EMBEDDING_MODEL: "text-embedding-3-small"
+  MAX_TOKENS: 4096
+
+  QDRANT_HOST: "localhost"
+  QDRANT_PORT: 6334
+  QDRANT_COLLECTION: "homa_kb"
+
+  REDIS_HOST: "localhost"
+  REDIS_PORT: 6379
+  REDIS_PASSWORD: ""
+  REDIS_DB: 1
+```
+
+---
+
+### 14.5 API Endpoints to Implement
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| POST | `/api/ai/chat` | Main chat endpoint |
+| GET | `/api/ai/config` | Get AI configuration |
+| PUT | `/api/ai/config` | Update AI configuration |
+| POST | `/api/ai/kb/reindex` | Batch reindex all KB articles |
+| GET | `/api/ai/jsfuncs` | List JS functions |
+| POST | `/api/ai/jsfuncs` | Create JS function |
+| PUT | `/api/ai/jsfuncs/:id` | Update JS function |
+| DELETE | `/api/ai/jsfuncs/:id` | Delete JS function |
+| POST | `/api/ai/jsfuncs/:id/test` | Test JS function |
+| GET | `/api/ai/workflows` | List workflows |
+| POST | `/api/ai/workflows` | Create workflow |
+| PUT | `/api/ai/workflows/:id` | Update workflow |
+| DELETE | `/api/ai/workflows/:id` | Delete workflow |
+| GET | `/api/ai/libraries` | List JS libraries |
+| POST | `/api/ai/libraries` | Upload JS library |
+| GET | `/api/ai/stats` | AI usage statistics |
+| GET | `/api/ai/handover-logs` | Handover history |
+
+---
+
+### 14.6 Testing Checklist
+
+After each phase, verify:
+
+#### Phase 1 - Core
+- [ ] Config loads from YAML
+- [ ] Models migrate without errors
+- [ ] Redis connection works
+- [ ] App registers in main.go
+
+#### Phase 2 - LLM
+- [ ] LLM client initializes
+- [ ] Can generate simple response
+- [ ] Token counting works
+
+#### Phase 3 - KB
+- [ ] Qdrant collection created
+- [ ] Article indexing works
+- [ ] Vector search returns results
+- [ ] GORM hooks trigger on article CRUD
+
+#### Phase 4 - Translation
+- [ ] Language detection works (test: English, Persian, Arabic)
+- [ ] Translation works
+- [ ] Redis cache stores/retrieves translations
+
+#### Phase 5 - JS Func
+- [ ] Goja runtime executes code
+- [ ] Timeout kills long-running scripts
+- [ ] External libraries load
+
+#### Phase 6 - Handover
+- [ ] Explicit phrases trigger handover
+- [ ] Budget limits trigger handover
+- [ ] Handover log created
+
+#### Phase 7 - Chat
+- [ ] Full chat flow works
+- [ ] KB context injected
+- [ ] Response translated
+- [ ] State persisted
+
+---
+
+### 14.7 Implementation Commands for Claude Code
+
+When asked to implement this feature, use these commands:
+
+```
+# Start implementation
+"Implement Phase 1 of the AI bot feature following the guide in docs/ai-bot-feature-analysis.md"
+
+# Continue to next phase
+"Continue with Phase 2 of the AI bot implementation"
+
+# Implement specific component
+"Implement the KB indexer following section 14.3 Phase 3 in the AI guide"
+
+# Test a phase
+"Run the Phase 3 tests from the AI implementation checklist"
+
+# Fix issues
+"Fix the KB indexer - the GORM hooks aren't triggering"
+```
+
+---
+
+### 14.8 Common Issues & Solutions
+
+| Issue | Solution |
+|-------|----------|
+| Qdrant connection refused | Ensure Qdrant is running: `docker run -p 6333:6333 -p 6334:6334 qdrant/qdrant` |
+| Redis connection failed | Start Redis: `docker run -p 6379:6379 redis:alpine` |
+| OpenAI rate limit | Implement retry with exponential backoff |
+| Large KB articles slow | Increase chunk size or use batch processing |
+| JS function timeout | Check function code for infinite loops |
+| Translation not working | Verify language detection returns valid ISO code |
+| Handover not triggering | Check if configs exist in database |
+
+---
+
+*Document Version: 1.1*
 *Generated: 2025-12-28*
 *Author: AI Architecture Analysis*
 *For: Homa Backend - AI Bot Feature Implementation*
