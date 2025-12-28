@@ -6,38 +6,65 @@ This document analyzes the proposed AI bot features for Homa and provides archit
 
 ---
 
-## 0. Go Libraries & Tools
+## 0. Go Libraries & Tools (FINAL DECISIONS)
 
-This section lists the recommended Go libraries for implementing the AI bot features.
+This section lists the **chosen** Go libraries for implementing the AI bot features.
 
-### 0.1 OpenAI Client
+### 0.1 AI Framework - LangChainGo (PRIMARY)
 
 | Library | URL | Notes |
 |---------|-----|-------|
-| **openai-go (Official)** | [github.com/openai/openai-go](https://github.com/openai/openai-go) | Official OpenAI library, streaming support, function calling |
-| **go-openai** | [github.com/sashabaranov/go-openai](https://github.com/sashabaranov/go-openai) | Popular community library, 2800+ projects use it, GPT-4o support |
+| **langchaingo** | [github.com/tmc/langchaingo](https://github.com/tmc/langchaingo) | Go port of LangChain - LLM orchestration, chains, tools, memory, RAG |
 
-**Recommendation**: Use `sashabaranov/go-openai` - mature, well-documented, supports function calling.
+**Use for**: All AI communications, workflows, tool calling, conversation memory, RAG pipelines.
 
 ```go
-import "github.com/sashabaranov/go-openai"
+import (
+    "github.com/tmc/langchaingo/llms/openai"
+    "github.com/tmc/langchaingo/chains"
+    "github.com/tmc/langchaingo/tools"
+    "github.com/tmc/langchaingo/memory"
+    "github.com/tmc/langchaingo/vectorstores/qdrant"
+    "github.com/tmc/langchaingo/embeddings"
+)
 
-client := openai.NewClient("your-api-key")
-resp, err := client.CreateChatCompletion(ctx, openai.ChatCompletionRequest{
-    Model: openai.GPT4,
-    Messages: []openai.ChatCompletionMessage{
-        {Role: openai.ChatMessageRoleSystem, Content: systemPrompt},
-        {Role: openai.ChatMessageRoleUser, Content: userMessage},
-    },
-    Functions: functions, // For JS Func calling
-})
+// Create LLM client
+llm, err := openai.New(openai.WithModel("gpt-4-turbo"))
+
+// Create embedder for vector search
+embedder, err := embeddings.NewEmbedder(llm)
+
+// Create conversation with memory
+conv := chains.NewConversation(llm, memory.NewConversationBuffer())
+
+// Create RAG chain with Qdrant
+store, err := qdrant.New(qdrant.WithURL("http://localhost:6333"))
+retriever := vectorstores.ToRetriever(store, 5) // top 5 results
+ragChain := chains.NewRetrievalQA(llm, retriever)
+
+// Define tools (JS Funcs become LangChain tools)
+myTools := []tools.Tool{
+    tools.NewTool("get_order_status", "Get order status by ID", getOrderStatusFunc),
+}
+agent := agents.NewOpenAIFunctionsAgent(llm, myTools)
 ```
+
+**LangChainGo Features Used**:
+- `llms/openai` - OpenAI API communication
+- `chains` - Conversation chains, RAG chains, sequential chains
+- `tools` - Tool/function definitions for AI (wraps JS Funcs)
+- `memory` - Conversation history management
+- `vectorstores/qdrant` - Built-in Qdrant integration for RAG
+- `agents` - Tool-calling agents with function calling
+- `prompts` - Prompt templates with variables
+- `embeddings` - Text embeddings for vector search
 
 ### 0.2 Vector Database (Qdrant)
 
 | Library | URL | Notes |
 |---------|-----|-------|
 | **go-client (Official)** | [github.com/qdrant/go-client](https://github.com/qdrant/go-client) | Official Qdrant Go client, gRPC-based |
+| **langchaingo/qdrant** | Built into langchaingo | High-level vectorstore interface |
 
 ```go
 import "github.com/qdrant/go-client/qdrant"
@@ -50,13 +77,9 @@ client, err := qdrant.NewClient(&qdrant.Config{
 
 ### 0.3 Language Detection
 
-| Library | URL | Accuracy | Languages |
-|---------|-----|----------|-----------|
-| **lingua-go** | [github.com/pemistahl/lingua-go](https://github.com/pemistahl/lingua-go) | Highest | 75 languages |
-| **whatlanggo** | [github.com/abadojack/whatlanggo](https://github.com/abadojack/whatlanggo) | Good | 80+ languages |
-| **go-lang-detector** | [github.com/chrisport/go-lang-detector](https://github.com/chrisport/go-lang-detector) | Medium | 7 languages |
-
-**Recommendation**: Use `lingua-go` - most accurate, works well with short text, offline, 75 languages.
+| Library | URL | Notes |
+|---------|-----|-------|
+| **lingua-go** | [github.com/pemistahl/lingua-go](https://github.com/pemistahl/lingua-go) | 75 languages, highest accuracy, offline |
 
 ```go
 import "github.com/pemistahl/lingua-go"
@@ -66,46 +89,44 @@ detector := lingua.NewLanguageDetectorBuilder().
     WithPreloadedLanguageModels().
     Build()
 
-language, exists := detector.DetectLanguageOf("مرحبا، چگونه می‌توانم کمکتان کنم؟")
-// Returns: Persian
+language, exists := detector.DetectLanguageOf("سلام، چگونه می‌توانم کمکتان کنم؟")
+// Returns: lingua.Persian
 ```
 
-### 0.4 JavaScript Runtime (Goja)
+### 0.4 JavaScript Runtime
 
 | Library | URL | Notes |
 |---------|-----|-------|
-| **goja** | [github.com/dop251/goja](https://github.com/dop251/goja) | Pure Go ES5.1 interpreter |
-| **goja_nodejs** | [github.com/dop251/goja_nodejs](https://github.com/dop251/goja_nodejs) | Node.js compatibility (require, console, etc.) |
-| **commonjs-goja** | [github.com/tliron/commonjs-goja](https://pkg.go.dev/github.com/tliron/commonjs-goja) | CommonJS module support |
-
-**For external/npm libraries**: Bundle with webpack/esbuild to ES5, then load into goja.
+| **goja_nodejs** | [github.com/dop251/goja_nodejs](https://github.com/dop251/goja_nodejs) | Goja + Node.js compatibility (require, console, buffer, process, etc.) |
 
 ```go
 import (
     "github.com/dop251/goja"
     "github.com/dop251/goja_nodejs/require"
+    "github.com/dop251/goja_nodejs/console"
 )
 
 registry := require.NewRegistry()
 vm := goja.New()
 registry.Enable(vm)
+console.Enable(vm)
 
 // Load bundled external library
 vm.RunString(bundledLibraryCode)
 
 // Execute function
-result, err := vm.RunString(`myFunction(input)`)
+result, err := vm.RunString(`main(input)`)
 ```
 
 ### 0.5 Additional Utilities
 
-| Purpose | Library | URL |
-|---------|---------|-----|
-| HTML to Text | `github.com/jaytaylor/html2text` | Clean KB articles |
-| Markdown Parser | `github.com/yuin/goldmark` | Parse markdown content |
-| Text Tokenizer | `github.com/pkoukk/tiktoken-go` | Count OpenAI tokens |
-| UUID | `github.com/google/uuid` | Generate IDs |
-| Sentiment Analysis | `github.com/cdipaolo/sentiment` | Basic sentiment detection |
+| Purpose | Library |
+|---------|---------|
+| HTML to Text | `github.com/jaytaylor/html2text` |
+| Markdown Parser | `github.com/yuin/goldmark` |
+| Token Counter | `github.com/pkoukk/tiktoken-go` |
+| UUID | `github.com/google/uuid` |
+| Redis Cache | `github.com/redis/go-redis/v9` |
 
 ---
 
@@ -452,120 +473,260 @@ type KnowledgeBaseChunk struct {
 
 ### 2.3 Feature: Automatic KB Sync with Qdrant
 
-**Requirement**: On any KB change, update Qdrant vectors.
+**Requirement**: On any KB change (create/update/delete), sync to Qdrant vectors.
 
-**Recommended Architecture**:
+**FINAL Architecture: Synchronous Hooks + Batch API**
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
-│                    KB Sync Architecture                          │
+│                    KB Sync Architecture (FINAL)                  │
 ├─────────────────────────────────────────────────────────────────┤
 │                                                                  │
-│  Option A: Synchronous (Simple, immediate)                       │
+│  Method 1: SYNCHRONOUS HOOKS (Automatic, real-time)             │
 │  ┌─────────────────────────────────────────────────────────────┐│
-│  │  KB Article AfterCreate/AfterUpdate Hook                     ││
+│  │                                                              ││
+│  │  KnowledgeBaseArticle.AfterCreate Hook                       ││
 │  │       ↓                                                      ││
-│  │  Queue job to background worker (don't block request)        ││
+│  │  ProcessArticle(article) → Chunk → Embed → Upsert Qdrant    ││
+│  │                                                              ││
+│  │  KnowledgeBaseArticle.AfterUpdate Hook                       ││
 │  │       ↓                                                      ││
-│  │  Worker: Chunk → Embed → Upsert Qdrant                       ││
+│  │  Delete old vectors → ProcessArticle → Upsert new vectors   ││
+│  │                                                              ││
+│  │  KnowledgeBaseArticle.AfterDelete Hook                       ││
+│  │       ↓                                                      ││
+│  │  Delete vectors from Qdrant by article_id                    ││
+│  │                                                              ││
 │  └─────────────────────────────────────────────────────────────┘│
 │                                                                  │
-│  Option B: Event-Driven (Scalable, decoupled)                   │
+│  Method 2: BATCH API (Manual, for maintenance/recovery)         │
 │  ┌─────────────────────────────────────────────────────────────┐│
-│  │  KB Article AfterCreate/AfterUpdate Hook                     ││
+│  │                                                              ││
+│  │  POST /api/admin/maintenance/reindex-kb                      ││
 │  │       ↓                                                      ││
-│  │  NATS Publish: "kb.article.updated" {article_id}             ││
+│  │  For each article in KB:                                     ││
+│  │    - Delete existing vectors                                 ││
+│  │    - Chunk content                                           ││
+│  │    - Generate embeddings (batched for efficiency)            ││
+│  │    - Upsert to Qdrant                                        ││
 │  │       ↓                                                      ││
-│  │  KB Indexer Service (separate or same process)               ││
-│  │  - Subscribe to "kb.article.*"                               ││
-│  │  - Process: Chunk → Embed → Upsert Qdrant                    ││
-│  │  - Update KBVectorIndex status                               ││
+│  │  Return: { processed: 150, errors: 2, duration: "45s" }     ││
+│  │                                                              ││
+│  │  Triggered from: Admin Dashboard → Maintenance → [Reindex]   ││
+│  │                                                              ││
 │  └─────────────────────────────────────────────────────────────┘│
 │                                                                  │
-│  Option C: Batch Processing (Cost-effective)                    │
-│  ┌─────────────────────────────────────────────────────────────┐│
-│  │  KB Article changes recorded in pending queue                ││
-│  │       ↓                                                      ││
-│  │  Cron job every 5 minutes                                    ││
-│  │  - Batch all pending articles                                ││
-│  │  - Process in single embedding API call                      ││
-│  │  - Upsert all to Qdrant                                      ││
-│  └─────────────────────────────────────────────────────────────┘│
-│                                                                  │
-│  RECOMMENDED: Option B with Option C fallback                    │
-│  - Real-time updates via NATS for immediate availability        │
-│  - Batch job as fallback for missed events                      │
-│  - Full re-index capability for embedding model upgrades        │
+│  When to use Batch API:                                         │
+│  - Initial setup (first time indexing all KB)                   │
+│  - After embedding model change                                 │
+│  - Recovery from Qdrant data loss                               │
+│  - Periodic maintenance (optional)                              │
 │                                                                  │
 └─────────────────────────────────────────────────────────────────┘
 ```
 
-**Implementation Pattern**:
+**GORM Hooks Implementation**:
+
+```go
+// In apps/models/knowledge_base.go
+
+// AfterCreate - Index new article to Qdrant
+func (a *KnowledgeBaseArticle) AfterCreate(tx *gorm.DB) error {
+    // Run in goroutine to not block the response
+    go func() {
+        if err := ai.KBIndexer.IndexArticle(a.ID); err != nil {
+            log.Error("Failed to index KB article", "id", a.ID, "error", err)
+        }
+    }()
+    return nil
+}
+
+// AfterUpdate - Re-index updated article
+func (a *KnowledgeBaseArticle) AfterUpdate(tx *gorm.DB) error {
+    go func() {
+        // Delete old vectors first
+        if err := ai.KBIndexer.DeleteArticleVectors(a.ID); err != nil {
+            log.Error("Failed to delete old vectors", "id", a.ID, "error", err)
+        }
+        // Index new content
+        if err := ai.KBIndexer.IndexArticle(a.ID); err != nil {
+            log.Error("Failed to re-index KB article", "id", a.ID, "error", err)
+        }
+    }()
+    return nil
+}
+
+// AfterDelete - Remove article vectors from Qdrant
+func (a *KnowledgeBaseArticle) AfterDelete(tx *gorm.DB) error {
+    go func() {
+        if err := ai.KBIndexer.DeleteArticleVectors(a.ID); err != nil {
+            log.Error("Failed to delete KB vectors", "id", a.ID, "error", err)
+        }
+    }()
+    return nil
+}
+```
+
+**KB Indexer using LangChainGo**:
 
 ```go
 // In apps/ai/kb_indexer.go
 
+import (
+    "github.com/tmc/langchaingo/embeddings"
+    "github.com/tmc/langchaingo/vectorstores/qdrant"
+    "github.com/tmc/langchaingo/textsplitter"
+)
+
 type KBIndexer struct {
-    qdrant      *qdrant.Client
-    embedder    *openai.Client
-    batchSize   int
-    workers     int
+    store    qdrant.Store
+    embedder embeddings.Embedder
+    splitter textsplitter.TokenSplitter
 }
 
-func (k *KBIndexer) ProcessArticle(articleID uint) error {
-    // 1. Fetch article
+func NewKBIndexer(llm *openai.LLM) *KBIndexer {
+    embedder, _ := embeddings.NewEmbedder(llm)
+    store, _ := qdrant.New(
+        qdrant.WithURL(config.Qdrant.URL),
+        qdrant.WithCollectionName("homa_kb"),
+        qdrant.WithEmbedder(embedder),
+    )
+    splitter := textsplitter.NewTokenSplitter(
+        textsplitter.WithChunkSize(500),
+        textsplitter.WithChunkOverlap(50),
+    )
+    return &KBIndexer{store: store, embedder: embedder, splitter: splitter}
+}
+
+// IndexArticle - Index single article to Qdrant
+func (k *KBIndexer) IndexArticle(articleID uint) error {
     var article models.KnowledgeBaseArticle
     if err := db.First(&article, articleID).Error; err != nil {
         return err
     }
 
-    // 2. Delete existing chunks from Qdrant
-    k.qdrant.Delete(collectionName, qdrant.Filter{
-        Must: []qdrant.Condition{{
-            Field: "article_id",
-            Match: qdrant.MatchValue(articleID),
-        }},
-    })
-
-    // 3. Chunk content
-    chunks := k.chunkContent(article.Content, ChunkConfig{
-        MaxTokens:    500,
-        OverlapSents: 2,
-        PreserveHeaders: true,
-    })
-
-    // 4. Generate embeddings (batch)
-    texts := make([]string, len(chunks))
-    for i, c := range chunks {
-        texts[i] = c.Text
+    // Skip if not published
+    if !article.Published {
+        return nil
     }
-    embeddings, err := k.embedder.CreateEmbeddings(ctx, texts)
 
-    // 5. Upsert to Qdrant
-    points := make([]qdrant.Point, len(chunks))
+    // Split into chunks
+    chunks, err := k.splitter.SplitText(article.Content)
+    if err != nil {
+        return err
+    }
+
+    // Create documents with metadata
+    docs := make([]schema.Document, len(chunks))
     for i, chunk := range chunks {
-        points[i] = qdrant.Point{
-            ID:     uuid.New().String(),
-            Vector: embeddings[i],
-            Payload: map[string]interface{}{
+        docs[i] = schema.Document{
+            PageContent: chunk,
+            Metadata: map[string]any{
                 "article_id":  articleID,
                 "chunk_index": i,
                 "title":       article.Title,
                 "url":         article.URL,
                 "category_id": article.CategoryID,
-                "content":     chunk.Text,
             },
         }
     }
-    return k.qdrant.Upsert(collectionName, points)
+
+    // Add to Qdrant (embeddings generated automatically)
+    _, err = k.store.AddDocuments(context.Background(), docs)
+    return err
+}
+
+// DeleteArticleVectors - Remove all vectors for an article
+func (k *KBIndexer) DeleteArticleVectors(articleID uint) error {
+    return k.store.Delete(context.Background(), qdrant.WithFilter(
+        qdrant.Filter{
+            Must: []qdrant.FieldCondition{{
+                Key:   "article_id",
+                Match: qdrant.MatchValue{Value: articleID},
+            }},
+        },
+    ))
+}
+
+// ReindexAll - Batch reindex all KB articles (for maintenance API)
+func (k *KBIndexer) ReindexAll(ctx context.Context) (*ReindexResult, error) {
+    result := &ReindexResult{StartedAt: time.Now()}
+
+    // Clear all existing vectors
+    k.store.Delete(ctx) // Delete all
+
+    // Get all published articles
+    var articles []models.KnowledgeBaseArticle
+    db.Where("published = ?", true).Find(&articles)
+
+    // Process in batches
+    for _, article := range articles {
+        select {
+        case <-ctx.Done():
+            return result, ctx.Err()
+        default:
+            if err := k.IndexArticle(article.ID); err != nil {
+                result.Errors = append(result.Errors, err.Error())
+            } else {
+                result.Processed++
+            }
+        }
+    }
+
+    result.Duration = time.Since(result.StartedAt)
+    return result, nil
+}
+
+type ReindexResult struct {
+    Processed int           `json:"processed"`
+    Errors    []string      `json:"errors"`
+    StartedAt time.Time     `json:"started_at"`
+    Duration  time.Duration `json:"duration"`
 }
 ```
 
-**Critique & Improvements**:
+**Maintenance API Endpoint**:
 
-1. **Idempotency**: Use deterministic chunk IDs (hash of article_id + chunk_index)
-2. **Version Tracking**: Track embedding model version for bulk re-indexing
-3. **Soft Delete**: Mark articles as deleted in Qdrant instead of hard delete
+```go
+// In apps/admin/maintenance_controller.go
+
+// POST /api/admin/maintenance/reindex-kb
+func ReindexKnowledgeBase(c *fiber.Ctx) error {
+    ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
+    defer cancel()
+
+    result, err := ai.KBIndexer.ReindexAll(ctx)
+    if err != nil {
+        return c.Status(500).JSON(fiber.Map{"error": err.Error()})
+    }
+
+    return c.JSON(result)
+}
+```
+
+**Admin Dashboard - Maintenance Section**:
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│  Maintenance                                                     │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                  │
+│  ┌─────────────────────────────────────────────────────────────┐│
+│  │  Knowledge Base Indexing                                     ││
+│  │                                                              ││
+│  │  Status: ● Healthy (Last sync: 5 minutes ago)               ││
+│  │  Articles indexed: 150 / 152                                 ││
+│  │                                                              ││
+│  │  [🔄 Reindex All KB Articles]                               ││
+│  │                                                              ││
+│  │  Use this to:                                                ││
+│  │  - Initial setup after enabling AI                          ││
+│  │  - Recovery after Qdrant restart                            ││
+│  │  - After changing embedding model                           ││
+│  └─────────────────────────────────────────────────────────────┘│
+│                                                                  │
+└─────────────────────────────────────────────────────────────────┘
+```
 4. **Progress Tracking**: Show indexing progress in admin UI
 5. **Error Recovery**: Retry failed indexing with exponential backoff
 
@@ -575,59 +736,132 @@ func (k *KBIndexer) ProcessArticle(articleID uint) error {
 
 **Requirement**: Always respond in user's language regardless of KB language.
 
-**Recommended Architecture**:
+**FINAL Architecture: Hybrid with Redis Cache**
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
-│                    Translation Pipeline                          │
+│                Translation Pipeline (HYBRID + REDIS CACHE)       │
 ├─────────────────────────────────────────────────────────────────┤
 │                                                                  │
-│  Strategy A: LLM-based Translation (Recommended)                │
-│  ┌─────────────────────────────────────────────────────────────┐│
+│  User Message (e.g., Persian)                                   │
+│       ↓                                                          │
+│  ┌──────────────────────────────────────────────────────────────┐│
+│  │  Step 1: Check Translation Cache (Redis)                     ││
 │  │                                                              ││
-│  │  System Prompt includes:                                     ││
-│  │  "Always respond in {client.language}. If the knowledge     ││
-│  │   base content is in a different language, translate it     ││
-│  │   accurately while preserving technical terms."              ││
+│  │  Cache Key: "trans:{kb_chunk_hash}:{target_lang}"           ││
+│  │  Example:   "trans:a1b2c3d4:fa"                              ││
 │  │                                                              ││
-│  │  Advantages:                                                 ││
-│  │  - Single API call (no separate translation)                 ││
-│  │  - Context-aware translation                                 ││
-│  │  - Preserves tone and style                                  ││
-│  │  - Handles technical terminology better                      ││
+│  │  If HIT → Use cached translated KB chunk                    ││
+│  │  If MISS → Continue to Step 2                                ││
+│  └──────────────────────────────────────────────────────────────┘│
+│       ↓                                                          │
+│  ┌──────────────────────────────────────────────────────────────┐│
+│  │  Step 2: LLM Response with Inline Translation                ││
 │  │                                                              ││
-│  └─────────────────────────────────────────────────────────────┘│
-│                                                                  │
-│  Strategy B: Separate Translation API                           │
-│  ┌─────────────────────────────────────────────────────────────┐│
+│  │  System Prompt:                                              ││
+│  │  "The user speaks {detected_language}.                       ││
+│  │   Respond ONLY in {detected_language}.                       ││
+│  │   Translate the KB context below if needed."                 ││
 │  │                                                              ││
-│  │  AI Response (in KB language)                                ││
+│  │  KB Context (Italian) + User Query (Persian)                 ││
 │  │       ↓                                                      ││
-│  │  Detect: response.language != client.language                ││
-│  │       ↓                                                      ││
-│  │  Translate via:                                              ││
-│  │  - DeepL API (highest quality)                               ││
-│  │  - Google Translate API                                      ││
-│  │  - Azure Translator                                          ││
+│  │  GPT generates response in Persian                           ││
+│  └──────────────────────────────────────────────────────────────┘│
+│       ↓                                                          │
+│  ┌──────────────────────────────────────────────────────────────┐│
+│  │  Step 3: Cache Translated Chunks (Redis)                     ││
 │  │                                                              ││
-│  │  Disadvantages:                                              ││
-│  │  - Extra API cost                                            ││
-│  │  - Extra latency                                             ││
-│  │  - May lose context/tone                                     ││
-│  │                                                              ││
-│  └─────────────────────────────────────────────────────────────┘│
+│  │  For each KB chunk used in response:                         ││
+│  │  - Generate translation separately (background)              ││
+│  │  - Store in Redis with TTL (e.g., 24 hours)                 ││
+│  │  - Next time same chunk + language = instant cache hit      ││
+│  └──────────────────────────────────────────────────────────────┘│
 │                                                                  │
-│  Strategy C: Hybrid (Recommended for complex cases)             │
-│  ┌─────────────────────────────────────────────────────────────┐│
-│  │                                                              ││
-│  │  1. LLM generates response with translation                  ││
-│  │  2. If response.confidence < threshold:                      ││
-│  │     - Use dedicated translation API                          ││
-│  │  3. Cache translated KB chunks for common languages          ││
-│  │                                                              ││
-│  └─────────────────────────────────────────────────────────────┘│
+│  Benefits:                                                      │
+│  ✓ First request: LLM handles translation (context-aware)      │
+│  ✓ Subsequent requests: Cached translations (fast, no LLM)     │
+│  ✓ Reduced token usage for repeated queries                    │
+│  ✓ Technical terms preserved across translations               │
 │                                                                  │
 └─────────────────────────────────────────────────────────────────┘
+```
+
+**Redis Cache Implementation**:
+
+```go
+// In apps/ai/translation_cache.go
+
+import "github.com/redis/go-redis/v9"
+
+type TranslationCache struct {
+    redis *redis.Client
+    ttl   time.Duration
+}
+
+func NewTranslationCache(redisURL string) *TranslationCache {
+    client := redis.NewClient(&redis.Options{Addr: redisURL})
+    return &TranslationCache{redis: client, ttl: 24 * time.Hour}
+}
+
+// GetCachedTranslation - Check if KB chunk is already translated
+func (c *TranslationCache) GetCachedTranslation(chunkHash, targetLang string) (string, bool) {
+    key := fmt.Sprintf("trans:%s:%s", chunkHash, targetLang)
+    result, err := c.redis.Get(ctx, key).Result()
+    if err == redis.Nil {
+        return "", false
+    }
+    return result, true
+}
+
+// CacheTranslation - Store translated chunk
+func (c *TranslationCache) CacheTranslation(chunkHash, targetLang, translation string) error {
+    key := fmt.Sprintf("trans:%s:%s", chunkHash, targetLang)
+    return c.redis.Set(ctx, key, translation, c.ttl).Err()
+}
+
+// GenerateChunkHash - Create consistent hash for KB chunk
+func GenerateChunkHash(content string) string {
+    hash := sha256.Sum256([]byte(content))
+    return hex.EncodeToString(hash[:8]) // First 8 bytes
+}
+```
+
+**Translation Flow with Cache**:
+
+```go
+// In apps/ai/responder.go
+
+func (r *AIResponder) prepareKBContext(chunks []Document, targetLang string) string {
+    var context strings.Builder
+
+    for _, chunk := range chunks {
+        chunkHash := GenerateChunkHash(chunk.PageContent)
+
+        // Check cache first
+        if cached, found := r.cache.GetCachedTranslation(chunkHash, targetLang); found {
+            context.WriteString(cached)
+            context.WriteString("\n\n")
+            continue
+        }
+
+        // Not cached - use original (LLM will translate inline)
+        context.WriteString(chunk.PageContent)
+        context.WriteString("\n\n")
+
+        // Background: translate and cache for next time
+        go r.translateAndCache(chunk.PageContent, chunkHash, targetLang)
+    }
+
+    return context.String()
+}
+
+func (r *AIResponder) translateAndCache(content, hash, targetLang string) {
+    // Use LLM to translate just this chunk
+    translated, err := r.llm.Translate(content, targetLang)
+    if err == nil {
+        r.cache.CacheTranslation(hash, targetLang, translated)
+    }
+}
 ```
 
 **Language Detection**:
@@ -3069,15 +3303,17 @@ All AI features should be configurable from the admin dashboard.
 
 The proposed AI bot system is ambitious but achievable. Key architectural decisions:
 
-1. **Use OpenAI Function Calling** for tool/JS Func integration
-2. **Use Qdrant** with chunked KB articles for RAG
-3. **Use Goja** for embedded JS execution (pure Go, no external deps)
-4. **Store workflows as JSON** in MySQL for horizontal scaling
-5. **Use NATS** for cross-instance cache invalidation
-6. **Implement 7-layer handover detection** (budget, timeout, explicit, frustration, AI failure, workflow dead end, JS Func failure)
-7. **Use lingua-go** for language detection on first message
-8. **Inline translation via GPT** for multi-language responses
-9. **Editable System Prompt** from admin dashboard
+1. **Use LangChainGo** as the primary AI framework for LLM orchestration, chains, tools, memory, and RAG
+2. **Use OpenAI Function Calling** via LangChainGo agents for tool/JS Func integration
+3. **Use Qdrant** with chunked KB articles for RAG (langchaingo/vectorstores/qdrant)
+4. **Use Goja** for embedded JS execution (pure Go, no external deps)
+5. **Store workflows as JSON** in MySQL for horizontal scaling
+6. **Use Redis** for translation caching and shared state
+7. **Use NATS** for cross-instance cache invalidation (workflows, JS funcs, configs)
+8. **Implement 7-layer handover detection** (budget, timeout, explicit, frustration, AI failure, workflow dead end, JS Func failure)
+9. **Use lingua-go** for language detection on first message
+10. **Hybrid translation pipeline** with Redis cache for frequently used translations
+11. **Editable System Prompt** from admin dashboard
 
 ### Confirmed Requirements
 
@@ -3086,7 +3322,7 @@ The proposed AI bot system is ambitious but achievable. Key architectural decisi
 | Single tenant | No tenant isolation needed |
 | No GDPR | Standard data handling |
 | Cost budget | `AIBudgetConfig` + `AIConversationUsage` |
-| Multi-language | Language detection (first msg) + GPT translation |
+| Multi-language | Language detection (first msg) + GPT translation + Redis cache |
 | Timeout handover | `AITimeoutConfig` with configurable limits |
 | Global enable/disable | `AIConfiguration.GlobalEnabled` master switch |
 | Editable system prompt | `AIConfiguration.SystemPromptTemplate` |
@@ -3098,11 +3334,13 @@ The proposed AI bot system is ambitious but achievable. Key architectural decisi
 
 | Component | Choice |
 |-----------|--------|
-| LLM Provider | OpenAI (GPT-4) via `sashabaranov/go-openai` |
-| Vector Database | Qdrant via `qdrant/go-client` |
-| Embeddings | text-embedding-3-small (multilingual) |
+| AI Framework | LangChainGo (`tmc/langchaingo`) - LLM orchestration, chains, tools, memory, RAG |
+| LLM Provider | OpenAI (GPT-4) via LangChainGo |
+| Vector Database | Qdrant via `qdrant/go-client` + `langchaingo/vectorstores/qdrant` |
+| Embeddings | text-embedding-3-small (multilingual) via LangChainGo |
 | JS Runtime | Goja (`dop251/goja` + `goja_nodejs`) |
 | Language Detection | `pemistahl/lingua-go` |
+| Cache | Redis (`redis/go-redis/v9`) - translation cache, shared state |
 | Messaging | NATS (existing) |
 | Database | MySQL (existing) |
 | Workflow Storage | JSON in MySQL |
