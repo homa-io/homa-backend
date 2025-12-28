@@ -36,8 +36,13 @@ go.work.sum
 # Binary files
 homa
 homa~
+homa-backend
+homa-backend~
 *.exe
 Model
+
+# Uploads directory
+uploads/
 
 # Config files
 config.dev.yml
