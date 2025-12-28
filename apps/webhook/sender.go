@@ -2,12 +2,11 @@ package webhook
 
 import (
 	"bytes"
-	"crypto/hmac"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/getevo/evo/v2/lib/db"
@@ -47,6 +46,10 @@ func SendWebhook(webhook *models.Webhook, event string, data map[string]any) err
 		return fmt.Errorf("failed to marshal payload: %w", err)
 	}
 
+	// Pretty print the body for logging
+	var prettyBody bytes.Buffer
+	json.Indent(&prettyBody, jsonData, "", "  ")
+
 	// Create HTTP request
 	req, err := http.NewRequest("POST", webhook.URL, bytes.NewBuffer(jsonData))
 	if err != nil {
@@ -59,34 +62,42 @@ func SendWebhook(webhook *models.Webhook, event string, data map[string]any) err
 	req.Header.Set("X-Webhook-Event", event)
 	req.Header.Set("X-Webhook-ID", fmt.Sprintf("%d", webhook.ID))
 
-	// Add HMAC signature if secret is set
+	// Add Authorization header if secret is set
 	if webhook.Secret != "" {
-		signature := generateHMACSignature(jsonData, webhook.Secret)
-		req.Header.Set("X-Webhook-Signature", signature)
+		req.Header.Set("Authorization", webhook.Secret)
 	}
+
+	// Capture headers for logging
+	headersJSON := formatHeaders(req.Header)
 
 	// Send request with timeout
 	client := &http.Client{
 		Timeout: 30 * time.Second,
 	}
 
+	startTime := time.Now()
 	resp, err := client.Do(req)
+	durationMs := time.Since(startTime).Milliseconds()
+
 	if err != nil {
-		// Log failed delivery
-		logWebhookDelivery(webhook.ID, event, false, err.Error())
+		// Log failed delivery with request details
+		logWebhookDeliveryFull(webhook.ID, event, false, webhook.URL, prettyBody.String(), headersJSON, 0, err.Error(), durationMs)
 		return fmt.Errorf("failed to send webhook: %w", err)
 	}
 	defer resp.Body.Close()
 
-	// Check response status
-	success := resp.StatusCode >= 200 && resp.StatusCode < 300
-	var responseMessage string
-	if !success {
-		responseMessage = fmt.Sprintf("received status code: %d", resp.StatusCode)
+	// Read response body
+	respBody, _ := io.ReadAll(resp.Body)
+	responseText := string(respBody)
+	if len(responseText) > 2000 {
+		responseText = responseText[:2000] + "... (truncated)"
 	}
 
-	// Log delivery
-	logWebhookDelivery(webhook.ID, event, success, responseMessage)
+	// Check response status
+	success := resp.StatusCode >= 200 && resp.StatusCode < 300
+
+	// Log delivery with full details
+	logWebhookDeliveryFull(webhook.ID, event, success, webhook.URL, prettyBody.String(), headersJSON, resp.StatusCode, responseText, durationMs)
 
 	if !success {
 		return fmt.Errorf("webhook returned non-success status: %d", resp.StatusCode)
@@ -113,23 +124,42 @@ func BroadcastWebhook(event string, data map[string]any) {
 	}
 }
 
-// generateHMACSignature creates an HMAC-SHA256 signature for the payload
-func generateHMACSignature(payload []byte, secret string) string {
-	mac := hmac.New(sha256.New, []byte(secret))
-	mac.Write(payload)
-	return hex.EncodeToString(mac.Sum(nil))
+// BroadcastWebhookWithData broadcasts a webhook event with data that may already contain nested structures
+// This is used for user webhooks where we pass the sanitized data directly
+func BroadcastWebhookWithData(event string, data map[string]any) {
+	BroadcastWebhook(event, data)
 }
 
-// logWebhookDelivery logs webhook delivery attempts
-func logWebhookDelivery(webhookID uint, event string, success bool, message string) {
+// formatHeaders converts http.Header to JSON string for logging
+func formatHeaders(headers http.Header) string {
+	headerMap := make(map[string]string)
+	for key, values := range headers {
+		headerMap[key] = strings.Join(values, ", ")
+	}
+	jsonBytes, _ := json.Marshal(headerMap)
+	return string(jsonBytes)
+}
+
+// logWebhookDeliveryFull logs webhook delivery attempts with full request details
+func logWebhookDeliveryFull(webhookID uint, event string, success bool, url, body, headers string, statusCode int, response string, durationMs int64) {
 	delivery := models.WebhookDelivery{
-		WebhookID: webhookID,
-		Event:     event,
-		Success:   success,
-		Response:  message,
+		WebhookID:      webhookID,
+		Event:          event,
+		Success:        success,
+		RequestURL:     url,
+		RequestBody:    body,
+		RequestHeaders: headers,
+		StatusCode:     statusCode,
+		Response:       response,
+		DurationMs:     durationMs,
 	}
 
 	if err := db.Create(&delivery).Error; err != nil {
 		log.Error("Failed to log webhook delivery:", err)
 	}
+}
+
+// logWebhookDelivery logs webhook delivery attempts (simplified version for backward compatibility)
+func logWebhookDelivery(webhookID uint, event string, success bool, message string) {
+	logWebhookDeliveryFull(webhookID, event, success, "", "", "", 0, message, 0)
 }
