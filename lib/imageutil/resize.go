@@ -2,6 +2,7 @@ package imageutil
 
 import (
 	"bytes"
+	"context"
 	"encoding/base64"
 	"fmt"
 	"image"
@@ -13,6 +14,7 @@ import (
 
 	"github.com/getevo/evo/v2/lib/settings"
 	"github.com/google/uuid"
+	"github.com/iesreza/homa-backend/apps/storage"
 	"golang.org/x/image/draw"
 )
 
@@ -35,7 +37,7 @@ func GetAvatarSize() int {
 }
 
 // ProcessAvatarFromBase64 takes a base64 encoded image, resizes it to the configured size,
-// and saves it to disk. Returns the relative URL path.
+// and saves it to S3 (if enabled) or disk. Returns the relative URL path.
 func ProcessAvatarFromBase64(base64Data string, subdir string) (string, error) {
 	// Parse base64 data - format: data:image/jpeg;base64,/9j/4AAQSkZJRg...
 	parts := strings.Split(base64Data, ",")
@@ -74,7 +76,21 @@ func ProcessAvatarFromBase64(base64Data string, subdir string) (string, error) {
 	// Generate filename
 	filename := uuid.New().String() + ".jpg"
 
-	// Get storage path
+	// Check if S3 is enabled - upload to S3
+	if storage.IsEnabled() {
+		key := fmt.Sprintf("avatars/%s/%s", subdir, filename)
+		ctx := context.Background()
+
+		err := storage.Upload(ctx, key, buf.Bytes(), "image/jpeg")
+		if err != nil {
+			return "", fmt.Errorf("failed to upload to S3: %w", err)
+		}
+
+		// Return S3 key path (will be served via media proxy)
+		return key, nil
+	}
+
+	// Fall back to local storage
 	storagePath := GetStoragePath()
 	avatarDir := filepath.Join(storagePath, "avatars", subdir)
 
@@ -126,13 +142,22 @@ func resizeAndCropToSquare(img image.Image, targetSize int) image.Image {
 	return resized
 }
 
-// DeleteAvatar removes an avatar file from disk
+// DeleteAvatar removes an avatar file from S3 or disk
 func DeleteAvatar(avatarURL string) error {
 	if avatarURL == "" {
 		return nil
 	}
 
-	// Convert URL to file path
+	// Check if it's an S3 key (starts with "avatars/")
+	if strings.HasPrefix(avatarURL, "avatars/") {
+		if storage.IsEnabled() {
+			ctx := context.Background()
+			return storage.Delete(ctx, avatarURL)
+		}
+		return nil
+	}
+
+	// Convert URL to file path for local storage
 	// URL format: /uploads/avatars/clients/uuid.jpg
 	// File path: {storage}/avatars/clients/uuid.jpg
 	relativePath := strings.TrimPrefix(avatarURL, "/uploads/")
