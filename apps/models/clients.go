@@ -63,6 +63,24 @@ func (c *Client) BeforeCreate(tx *gorm.DB) error {
 	return nil
 }
 
+// AfterCreate hook - broadcast client creation to webhooks
+func (c *Client) AfterCreate(tx *gorm.DB) error {
+	// Trigger webhook with full client entity
+	go BroadcastWebhook(WebhookEventClientCreated, map[string]any{
+		"client": c,
+	})
+	return nil
+}
+
+// AfterUpdate hook - broadcast client update to webhooks
+func (c *Client) AfterUpdate(tx *gorm.DB) error {
+	// Trigger webhook with full client entity
+	go BroadcastWebhook(WebhookEventClientUpdated, map[string]any{
+		"client": c,
+	})
+	return nil
+}
+
 func (ClientExternalID) TableName() string {
 	return "client_external_ids"
 }

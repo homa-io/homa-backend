@@ -113,6 +113,45 @@ func (u *User) BeforeCreate(tx *gorm.DB) error {
 	return nil
 }
 
+// AfterCreate hook - broadcast user creation to webhooks
+func (u *User) AfterCreate(tx *gorm.DB) error {
+	// Trigger webhook with sanitized user entity
+	if UserWebhookBroadcaster != nil {
+		go UserWebhookBroadcaster("user.created", u.ToWebhookData())
+	}
+	return nil
+}
+
+// AfterUpdate hook - broadcast user update to webhooks
+func (u *User) AfterUpdate(tx *gorm.DB) error {
+	// Trigger webhook with sanitized user entity
+	if UserWebhookBroadcaster != nil {
+		go UserWebhookBroadcaster("user.updated", u.ToWebhookData())
+	}
+	return nil
+}
+
+// ToWebhookData returns a sanitized version of the user without sensitive data
+func (u *User) ToWebhookData() map[string]any {
+	return map[string]any{
+		"user": map[string]any{
+			"id":           u.UserID,
+			"name":         u.Name,
+			"last_name":    u.LastName,
+			"display_name": u.DisplayName,
+			"email":        u.Email,
+			"type":         u.Type,
+			"status":       u.Status,
+			"avatar":       u.Avatar,
+			"created_at":   u.CreatedAt,
+			"updated_at":   u.UpdatedAt,
+		},
+	}
+}
+
+// UserWebhookBroadcaster is set by the models package to avoid circular dependencies
+var UserWebhookBroadcaster func(event string, data map[string]any)
+
 // Evo UserInterface implementation
 func (u *User) GetFirstName() string {
 	return u.Name

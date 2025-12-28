@@ -1,15 +1,9 @@
 package ai
 
 import (
-	"encoding/binary"
+	"encoding/json"
 	"fmt"
-	"math"
 	"strings"
-
-	"github.com/getevo/evo/v2/lib/db"
-	"github.com/getevo/evo/v2/lib/log"
-	"github.com/google/uuid"
-	"github.com/iesreza/homa-backend/apps/models"
 )
 
 // MessageInput represents a message for AI processing
@@ -57,27 +51,33 @@ type SummarizeResponse struct {
 	MessageCount int      `json:"message_count"`
 }
 
-// GenerateResponseRequest represents a response generation request
-type GenerateResponseRequest struct {
-	Messages     []MessageInput `json:"messages"`
-	Context      string         `json:"context,omitempty"`       // Optional additional context
-	MaxResults   int            `json:"max_results,omitempty"`   // Max knowledge base results to use
-	CategoryID   *string        `json:"category_id,omitempty"`   // Optional category filter for KB search
+// GenerateArticleSummaryRequest represents a request to generate an article summary
+type GenerateArticleSummaryRequest struct {
+	Title   string `json:"title"`
+	Content string `json:"content"`
 }
 
-// GenerateResponseResponse represents a response generation response
-type GenerateResponseResponse struct {
-	Response       string              `json:"response"`
-	Sources        []KnowledgeSource   `json:"sources,omitempty"`
-	Confidence     float64             `json:"confidence"`
+// GenerateArticleSummaryResponse represents the generated summary response
+type GenerateArticleSummaryResponse struct {
+	Summary string `json:"summary"`
 }
 
-// KnowledgeSource represents a knowledge base source used for response generation
-type KnowledgeSource struct {
-	ArticleID    string  `json:"article_id"`
-	ArticleTitle string  `json:"article_title"`
-	Excerpt      string  `json:"excerpt"`
-	Relevance    float64 `json:"relevance"`
+// SmartReplyRequest represents a smart reply request
+type SmartReplyRequest struct {
+	AgentMessage    string `json:"agent_message"`
+	UserLastMessage string `json:"user_last_message"`
+	Tone            string `json:"tone,omitempty"`            // Optional: formal, casual, professional, friendly, empathetic
+	TargetLanguage  string `json:"target_language,omitempty"` // Optional: override target language instead of detecting from user message
+}
+
+// SmartReplyResponse represents a smart reply response
+type SmartReplyResponse struct {
+	OriginalText          string   `json:"original_text"`
+	ImprovedText          string   `json:"improved_text"`
+	DetectedUserLanguage  string   `json:"detected_user_language"`
+	DetectedAgentLanguage string   `json:"detected_agent_language"`
+	WasTranslated         bool     `json:"was_translated"`
+	Improvements          []string `json:"improvements"`
 }
 
 // Translate translates text to the specified language
@@ -96,7 +96,7 @@ func Translate(req TranslateRequest) (*TranslateResponse, error) {
 
 	messages := []ChatMessage{
 		{
-			Role: "system",
+			Role:    "system",
 			Content: `You are a professional translator. Translate the given text to the specified language accurately while preserving the original meaning, tone, and style. Only output the translated text without any explanations or additional comments.`,
 		},
 		{
@@ -306,10 +306,10 @@ func parseSummaryResponse(content string) (string, []string) {
 	return summary, keyPoints
 }
 
-// GenerateResponse generates a response using RAG (Retrieval-Augmented Generation)
-func GenerateResponse(req GenerateResponseRequest) (*GenerateResponseResponse, error) {
-	if len(req.Messages) == 0 {
-		return nil, fmt.Errorf("messages are required")
+// GenerateArticleSummary generates a summary for an article based on its title and content
+func GenerateArticleSummary(req GenerateArticleSummaryRequest) (*GenerateArticleSummaryResponse, error) {
+	if req.Content == "" {
+		return nil, fmt.Errorf("content is required")
 	}
 
 	client := GetClient()
@@ -317,64 +317,83 @@ func GenerateResponse(req GenerateResponseRequest) (*GenerateResponseResponse, e
 		return nil, fmt.Errorf("OpenAI client not initialized")
 	}
 
-	if req.MaxResults == 0 {
-		req.MaxResults = 5
+	messages := []ChatMessage{
+		{
+			Role: "system",
+			Content: `You are a professional content writer. Generate a concise and engaging summary for the given article.
+The summary should:
+- Be 1-2 sentences (maximum 200 characters)
+- Capture the main topic and key value proposition
+- Be written in a clear, informative style
+- Encourage readers to read the full article
+
+Only output the summary text without any explanations, quotes, or additional comments.`,
+		},
+		{
+			Role:    "user",
+			Content: fmt.Sprintf("Generate a summary for this article:\n\nTitle: %s\n\nContent:\n%s", req.Title, req.Content),
+		},
 	}
 
-	// Extract the last user message as the query
-	var query string
-	for i := len(req.Messages) - 1; i >= 0; i-- {
-		if req.Messages[i].Role == "user" {
-			query = req.Messages[i].Content
-			break
-		}
-	}
-
-	if query == "" {
-		// Use the last message if no user message found
-		query = req.Messages[len(req.Messages)-1].Content
-	}
-
-	// Search knowledge base for relevant content
-	sources, relevantContent, err := searchKnowledgeBase(query, req.MaxResults, req.CategoryID)
+	resp, err := client.ChatCompletion(messages, 300, 0.7)
 	if err != nil {
-		log.Warning("Knowledge base search failed: %v", err)
-		// Continue without KB content
+		return nil, fmt.Errorf("summary generation failed: %w", err)
 	}
 
-	// Build conversation context
-	var conversationContext strings.Builder
-	for _, msg := range req.Messages {
-		role := "Customer"
-		if msg.Role == "agent" {
-			role = "Agent"
-		}
-		conversationContext.WriteString(fmt.Sprintf("%s: %s\n", role, msg.Content))
+	if len(resp.Choices) == 0 {
+		return nil, fmt.Errorf("no summary received")
 	}
 
-	// Build system prompt with knowledge base context
-	systemPrompt := `You are a helpful customer support agent. Your goal is to assist customers with their questions and issues.
+	return &GenerateArticleSummaryResponse{
+		Summary: strings.TrimSpace(resp.Choices[0].Message.Content),
+	}, nil
+}
 
-Guidelines:
-- Be professional, friendly, and helpful
-- Provide accurate information based on the knowledge base when available
-- If you don't know the answer, acknowledge it and offer to escalate or find more information
-- Keep responses concise but complete
-- Address the customer's specific question or concern`
-
-	if relevantContent != "" {
-		systemPrompt += fmt.Sprintf(`
-
-KNOWLEDGE BASE INFORMATION (use this to answer the customer's question):
-%s`, relevantContent)
+// SmartReply analyzes agent message, detects languages, translates if needed, and fixes grammar
+func SmartReply(req SmartReplyRequest) (*SmartReplyResponse, error) {
+	if req.AgentMessage == "" {
+		return nil, fmt.Errorf("agent message is required")
+	}
+	if req.UserLastMessage == "" {
+		return nil, fmt.Errorf("user last message is required")
 	}
 
-	if req.Context != "" {
-		systemPrompt += fmt.Sprintf(`
-
-ADDITIONAL CONTEXT:
-%s`, req.Context)
+	client := GetClient()
+	if client == nil {
+		return nil, fmt.Errorf("OpenAI client not initialized")
 	}
+
+	// Build tone instruction if provided
+	toneInstruction := ""
+	if req.Tone != "" {
+		toneInstruction = fmt.Sprintf("\n6. IMPORTANT: Apply a %s tone to the message - this is mandatory", req.Tone)
+	}
+
+	// Build language instruction
+	languageInstruction := "3. If the agent's reply is in a different language than the user's message, translate it to the user's language"
+	targetLangNote := ""
+	if req.TargetLanguage != "" {
+		languageInstruction = fmt.Sprintf("3. MANDATORY: You MUST translate the agent's reply to %s - the output MUST be in %s language regardless of the original language", req.TargetLanguage, req.TargetLanguage)
+		targetLangNote = fmt.Sprintf("\n\nCRITICAL: The improved_text MUST be written in %s language. This is a hard requirement.", req.TargetLanguage)
+	}
+
+	systemPrompt := fmt.Sprintf(`You are a smart reply assistant for customer support agents. Your task is to:
+1. Detect the language of the user's last message (this is the language the user prefers)
+2. Detect the language of the agent's reply
+%s
+4. Fix any grammatical errors and improve the text quality while preserving the original meaning
+5. Make the message sound professional and friendly%s%s
+
+You MUST respond in this exact JSON format:
+{
+  "detected_user_language": "the language name of user's message (e.g., English, Spanish, Persian, etc.)",
+  "detected_agent_language": "the language name of agent's message",
+  "was_translated": true/false,
+  "improved_text": "the final improved message in the target language",
+  "improvements": ["list of improvements made, e.g., 'Fixed grammar', 'Translated from English to Persian', 'Applied formal tone']
+}
+
+Only output valid JSON, nothing else.`, languageInstruction, toneInstruction, targetLangNote)
 
 	messages := []ChatMessage{
 		{
@@ -382,220 +401,46 @@ ADDITIONAL CONTEXT:
 			Content: systemPrompt,
 		},
 		{
-			Role:    "user",
-			Content: fmt.Sprintf("Based on the conversation below, generate an appropriate response to the customer's latest message.\n\nConversation:\n%s\n\nGenerate a helpful response:", conversationContext.String()),
+			Role: "user",
+			Content: fmt.Sprintf("User's last message:\n\"%s\"\n\nAgent's reply to improve:\n\"%s\"", req.UserLastMessage, req.AgentMessage),
 		},
 	}
 
-	resp, err := client.ChatCompletion(messages, 1000, 0.7)
+	resp, err := client.ChatCompletion(messages, 2000, 0.3)
 	if err != nil {
-		return nil, fmt.Errorf("response generation failed: %w", err)
+		return nil, fmt.Errorf("smart reply failed: %w", err)
 	}
 
 	if len(resp.Choices) == 0 {
-		return nil, fmt.Errorf("no response generated")
+		return nil, fmt.Errorf("no response received")
 	}
 
-	// Calculate confidence based on whether we found relevant KB content
-	confidence := 0.5
-	if len(sources) > 0 {
-		// Average the relevance scores
-		var totalRelevance float64
-		for _, s := range sources {
-			totalRelevance += s.Relevance
-		}
-		confidence = totalRelevance / float64(len(sources))
+	// Parse the JSON response
+	content := strings.TrimSpace(resp.Choices[0].Message.Content)
+	// Remove markdown code blocks if present
+	content = strings.TrimPrefix(content, "```json")
+	content = strings.TrimPrefix(content, "```")
+	content = strings.TrimSuffix(content, "```")
+	content = strings.TrimSpace(content)
+
+	var aiResponse struct {
+		DetectedUserLanguage  string   `json:"detected_user_language"`
+		DetectedAgentLanguage string   `json:"detected_agent_language"`
+		WasTranslated         bool     `json:"was_translated"`
+		ImprovedText          string   `json:"improved_text"`
+		Improvements          []string `json:"improvements"`
 	}
 
-	return &GenerateResponseResponse{
-		Response:   strings.TrimSpace(resp.Choices[0].Message.Content),
-		Sources:    sources,
-		Confidence: confidence,
+	if err := json.Unmarshal([]byte(content), &aiResponse); err != nil {
+		return nil, fmt.Errorf("failed to parse AI response: %w (content: %s)", err, content)
+	}
+
+	return &SmartReplyResponse{
+		OriginalText:          req.AgentMessage,
+		ImprovedText:          aiResponse.ImprovedText,
+		DetectedUserLanguage:  aiResponse.DetectedUserLanguage,
+		DetectedAgentLanguage: aiResponse.DetectedAgentLanguage,
+		WasTranslated:         aiResponse.WasTranslated,
+		Improvements:          aiResponse.Improvements,
 	}, nil
-}
-
-// searchKnowledgeBase searches for relevant content in the knowledge base using Qdrant
-func searchKnowledgeBase(query string, maxResults int, categoryID *string) ([]KnowledgeSource, string, error) {
-	qdrant := GetQdrantClient()
-	if qdrant == nil {
-		return nil, "", fmt.Errorf("Qdrant client not initialized")
-	}
-
-	// Search using Qdrant
-	results, err := qdrant.SearchByText(query, maxResults, categoryID)
-	if err != nil {
-		return nil, "", fmt.Errorf("Qdrant search failed: %w", err)
-	}
-
-	if len(results) == 0 {
-		return nil, "", nil
-	}
-
-	// Build sources and content from Qdrant results
-	var sources []KnowledgeSource
-	var contentBuilder strings.Builder
-	seenArticles := make(map[string]bool)
-
-	for _, result := range results {
-		articleID, _ := result.Payload["article_id"].(string)
-		articleTitle, _ := result.Payload["article_title"].(string)
-		chunkContent, _ := result.Payload["chunk_content"].(string)
-		excerpt, _ := result.Payload["excerpt"].(string)
-
-		if articleTitle == "" {
-			articleTitle = "Unknown Article"
-		}
-
-		if !seenArticles[articleID] {
-			seenArticles[articleID] = true
-
-			sourceExcerpt := excerpt
-			if sourceExcerpt == "" {
-				sourceExcerpt = truncateText(chunkContent, 200)
-			}
-
-			sources = append(sources, KnowledgeSource{
-				ArticleID:    articleID,
-				ArticleTitle: articleTitle,
-				Excerpt:      sourceExcerpt,
-				Relevance:    float64(result.Score),
-			})
-		}
-
-		contentBuilder.WriteString(fmt.Sprintf("--- From: %s ---\n%s\n\n",
-			articleTitle,
-			chunkContent))
-	}
-
-	return sources, contentBuilder.String(), nil
-}
-
-// cosineSimilarity calculates the cosine similarity between two vectors
-func cosineSimilarity(a, b []float32) float64 {
-	if len(a) != len(b) {
-		return 0
-	}
-
-	var dotProduct, normA, normB float64
-	for i := range a {
-		dotProduct += float64(a[i]) * float64(b[i])
-		normA += float64(a[i]) * float64(a[i])
-		normB += float64(b[i]) * float64(b[i])
-	}
-
-	if normA == 0 || normB == 0 {
-		return 0
-	}
-
-	return dotProduct / (math.Sqrt(normA) * math.Sqrt(normB))
-}
-
-// bytesToFloat32 converts a byte slice to a float32 slice
-func bytesToFloat32(data []byte) []float32 {
-	if len(data) == 0 || len(data)%4 != 0 {
-		return nil
-	}
-
-	result := make([]float32, len(data)/4)
-	for i := 0; i < len(result); i++ {
-		bits := binary.LittleEndian.Uint32(data[i*4 : (i+1)*4])
-		result[i] = math.Float32frombits(bits)
-	}
-	return result
-}
-
-// float32ToBytes converts a float32 slice to a byte slice
-func Float32ToBytes(data []float32) []byte {
-	result := make([]byte, len(data)*4)
-	for i, v := range data {
-		bits := math.Float32bits(v)
-		binary.LittleEndian.PutUint32(result[i*4:], bits)
-	}
-	return result
-}
-
-// truncateText truncates text to a maximum length
-func truncateText(text string, maxLen int) string {
-	if len(text) <= maxLen {
-		return text
-	}
-	return text[:maxLen] + "..."
-}
-
-// IndexArticle creates embeddings for an article and stores them as chunks
-func IndexArticle(articleID uuid.UUID) error {
-	client := GetClient()
-	if client == nil {
-		return fmt.Errorf("OpenAI client not initialized")
-	}
-
-	// Get the article
-	var article models.KnowledgeBaseArticle
-	if err := db.Where("id = ?", articleID).First(&article).Error; err != nil {
-		return fmt.Errorf("article not found: %w", err)
-	}
-
-	// Delete existing chunks
-	if err := db.Where("article_id = ?", articleID).Delete(&models.KnowledgeBaseChunk{}).Error; err != nil {
-		return fmt.Errorf("failed to delete existing chunks: %w", err)
-	}
-
-	// Clean and chunk the content
-	tokenizer := NewTokenizer()
-	cleanContent := tokenizer.CleanText(article.Content)
-	chunks := tokenizer.ChunkText(cleanContent)
-
-	if len(chunks) == 0 {
-		return nil
-	}
-
-	// Get embeddings for all chunks
-	var texts []string
-	for _, chunk := range chunks {
-		texts = append(texts, chunk.Content)
-	}
-
-	embResp, err := client.GetEmbedding(texts)
-	if err != nil {
-		return fmt.Errorf("failed to get embeddings: %w", err)
-	}
-
-	// Create chunk records
-	for i, chunk := range chunks {
-		var embedding []byte
-		if i < len(embResp.Data) {
-			embedding = Float32ToBytes(embResp.Data[i].Embedding)
-		}
-
-		dbChunk := models.KnowledgeBaseChunk{
-			ID:         uuid.New(),
-			ArticleID:  articleID,
-			Content:    chunk.Content,
-			ChunkIndex: chunk.Index,
-			TokenCount: chunk.TokenCount,
-			Embedding:  embedding,
-		}
-
-		if err := db.Create(&dbChunk).Error; err != nil {
-			log.Error("Failed to create chunk: %v", err)
-		}
-	}
-
-	return nil
-}
-
-// ReindexAllArticles reindexes all published articles
-func ReindexAllArticles() error {
-	var articles []models.KnowledgeBaseArticle
-	if err := db.Where("status = ?", "published").Find(&articles).Error; err != nil {
-		return fmt.Errorf("failed to fetch articles: %w", err)
-	}
-
-	for _, article := range articles {
-		if err := IndexArticle(article.ID); err != nil {
-			log.Error("Failed to index article %s: %v", article.ID, err)
-		}
-	}
-
-	return nil
 }

@@ -93,8 +93,50 @@ type Tag struct {
 	restify.API
 }
 
-// GORM Hooks for Conversation
+// ToWebhookData creates a clean conversation map for webhook payloads
+// excluding empty relationships and only including client with external IDs
+func (c *Conversation) ToWebhookData() map[string]any {
+	data := map[string]any{
+		"id":               c.ID,
+		"title":            c.Title,
+		"client_id":        c.ClientID,
+		"department_id":    c.DepartmentID,
+		"channel_id":       c.ChannelID,
+		"external_id":      c.ExternalID,
+		"status":           c.Status,
+		"priority":         c.Priority,
+		"custom_fields":    c.CustomFields,
+		"ip":               c.IP,
+		"browser":          c.Browser,
+		"operating_system": c.OperatingSystem,
+		"created_at":       c.CreatedAt,
+		"updated_at":       c.UpdatedAt,
+		"closed_at":        c.ClosedAt,
+	}
 
+	// Include client if loaded (non-zero ID)
+	if c.Client.ID != uuid.Nil {
+		clientData := map[string]any{
+			"id":         c.Client.ID,
+			"name":       c.Client.Name,
+			"avatar":     c.Client.Avatar,
+			"data":       c.Client.Data,
+			"language":   c.Client.Language,
+			"timezone":   c.Client.Timezone,
+			"created_at": c.Client.CreatedAt,
+			"updated_at": c.Client.UpdatedAt,
+		}
+		// Include external IDs if loaded
+		if len(c.Client.ExternalIDs) > 0 {
+			clientData["external_ids"] = c.Client.ExternalIDs
+		}
+		data["client"] = clientData
+	}
+
+	return data
+}
+
+// GORM Hooks for Conversation
 
 // AfterCreate hook - broadcast conversation creation to NATS and webhooks
 func (c *Conversation) AfterCreate(tx *gorm.DB) error {
@@ -110,18 +152,18 @@ func (c *Conversation) AfterCreate(tx *gorm.DB) error {
 		}
 	}()
 
-	// Trigger webhook with full conversation and client entities
+	// Trigger webhook with clean conversation data
 	go func() {
 		// Fetch conversation with client and client's external IDs
 		var conversation Conversation
 		if err := db.Preload("Client").Preload("Client.ExternalIDs").First(&conversation, c.ID).Error; err == nil {
 			BroadcastWebhook(WebhookEventConversationCreated, map[string]any{
-				"conversation": conversation,
+				"conversation": conversation.ToWebhookData(),
 			})
 		} else {
 			// Fallback with just the conversation
 			BroadcastWebhook(WebhookEventConversationCreated, map[string]any{
-				"conversation": c,
+				"conversation": c.ToWebhookData(),
 			})
 		}
 	}()
@@ -151,6 +193,8 @@ func (c *Conversation) AfterUpdate(tx *gorm.DB) error {
 			conversation = *c
 		}
 
+		convData := conversation.ToWebhookData()
+
 		// Check if status changed
 		if tx.Statement.Changed("Status") {
 			// Get old value from select clause
@@ -158,7 +202,7 @@ func (c *Conversation) AfterUpdate(tx *gorm.DB) error {
 			if err := tx.Session(&gorm.Session{}).Clauses(clause.Returning{}).Where("id = ?", c.ID).First(&oldConv).Error; err == nil {
 				if oldConv.Status != c.Status {
 					BroadcastWebhook(WebhookEventConversationStatusChange, map[string]any{
-						"conversation": conversation,
+						"conversation": convData,
 						"old_status":   oldConv.Status,
 						"new_status":   c.Status,
 					})
@@ -168,14 +212,14 @@ func (c *Conversation) AfterUpdate(tx *gorm.DB) error {
 			// Check if conversation is closed
 			if c.Status == ConversationStatusClosed {
 				BroadcastWebhook(WebhookEventConversationClosed, map[string]any{
-					"conversation": conversation,
+					"conversation": convData,
 				})
 			}
 		}
 
-		// Trigger general update webhook with full conversation entity
+		// Trigger general update webhook with clean conversation data
 		BroadcastWebhook(WebhookEventConversationUpdated, map[string]any{
-			"conversation": conversation,
+			"conversation": convData,
 		})
 	}()
 
@@ -212,19 +256,30 @@ func (m *Message) AfterCreate(tx *gorm.DB) error {
 		}
 	}()
 
-	// Trigger webhook with full message, conversation, and client entities
+	// Trigger webhook with message and conversation (with client)
 	go func() {
+		// Create clean message map without nested relationships
+		messageData := map[string]any{
+			"id":                m.ID,
+			"conversation_id":   m.ConversationID,
+			"user_id":           m.UserID,
+			"client_id":         m.ClientID,
+			"body":              m.Body,
+			"is_system_message": m.IsSystemMessage,
+			"created_at":        m.CreatedAt,
+		}
+
 		// Fetch the full conversation with client and client's external IDs for the webhook
 		var conversation Conversation
 		if err := db.Preload("Client").Preload("Client.ExternalIDs").First(&conversation, m.ConversationID).Error; err == nil {
 			BroadcastWebhook(WebhookEventMessageCreated, map[string]any{
-				"message":      m,
-				"conversation": conversation,
+				"message":      messageData,
+				"conversation": conversation.ToWebhookData(),
 			})
 		} else {
 			// Fallback if conversation fetch fails
 			BroadcastWebhook(WebhookEventMessageCreated, map[string]any{
-				"message": m,
+				"message": messageData,
 			})
 		}
 	}()

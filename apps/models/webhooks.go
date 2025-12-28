@@ -41,6 +41,11 @@ func (w *Webhook) IsSubscribedTo(event string) bool {
 		return true
 	}
 
+	// Test events always pass through
+	if event == WebhookEventWebhookTest {
+		return true
+	}
+
 	// Check specific event subscription
 	switch event {
 	case WebhookEventConversationCreated:
@@ -74,8 +79,19 @@ type WebhookDelivery struct {
 	WebhookID uint      `gorm:"not null;index;fk:webhooks" json:"webhook_id"`
 	Event     string    `gorm:"size:100;not null" json:"event"`
 	Success   bool      `gorm:"not null" json:"success"`
-	Response  string    `gorm:"type:text" json:"response,omitempty"`
-	CreatedAt time.Time `gorm:"autoCreateTime" json:"created_at"`
+
+	// Request details for debugging
+	RequestURL     string `gorm:"size:500" json:"request_url,omitempty"`
+	RequestBody    string `gorm:"type:text" json:"request_body,omitempty"`
+	RequestHeaders string `gorm:"type:text" json:"request_headers,omitempty"`
+
+	// Response details
+	StatusCode int    `gorm:"default:0" json:"status_code"`
+	Response   string `gorm:"type:text" json:"response,omitempty"`
+
+	// Duration in milliseconds
+	DurationMs int64     `gorm:"default:0" json:"duration_ms"`
+	CreatedAt  time.Time `gorm:"autoCreateTime" json:"created_at"`
 
 	Webhook Webhook `gorm:"foreignKey:WebhookID;references:ID" json:"webhook,omitempty"`
 
@@ -94,5 +110,6 @@ const (
 	WebhookEventClientUpdated            = "client.updated"
 	WebhookEventUserCreated              = "user.created"
 	WebhookEventUserUpdated              = "user.updated"
+	WebhookEventWebhookTest              = "webhook.test"
 	WebhookEventAll                      = "*"
 )

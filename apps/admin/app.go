@@ -70,6 +70,42 @@ func (a App) Router() error {
 	// Message management APIs
 	evo.Delete("/api/admin/messages/:id", controller.DeleteMessage)
 
+	// Knowledge Base Article APIs
+	evo.Get("/api/admin/kb/articles", controller.ListKBArticles)
+	evo.Get("/api/admin/kb/articles/:id", controller.GetKBArticle)
+	evo.Post("/api/admin/kb/articles", controller.CreateKBArticle)
+	evo.Put("/api/admin/kb/articles/:id", controller.UpdateKBArticle)
+	evo.Delete("/api/admin/kb/articles/:id", controller.DeleteKBArticle)
+
+	// Knowledge Base Category APIs
+	evo.Get("/api/admin/kb/categories", controller.ListKBCategories)
+	evo.Get("/api/admin/kb/categories/:id", controller.GetKBCategory)
+	evo.Post("/api/admin/kb/categories", controller.CreateKBCategory)
+	evo.Put("/api/admin/kb/categories/:id", controller.UpdateKBCategory)
+	evo.Delete("/api/admin/kb/categories/:id", controller.DeleteKBCategory)
+
+	// Knowledge Base Tag APIs
+	evo.Get("/api/admin/kb/tags", controller.ListKBTags)
+	evo.Get("/api/admin/kb/tags/:id", controller.GetKBTag)
+	evo.Post("/api/admin/kb/tags", controller.CreateKBTag)
+	evo.Put("/api/admin/kb/tags/:id", controller.UpdateKBTag)
+	evo.Delete("/api/admin/kb/tags/:id", controller.DeleteKBTag)
+
+	// Knowledge Base Media Upload
+	evo.Post("/api/admin/kb/upload", controller.UploadKBMedia)
+
+	// Webhook management APIs
+	evo.Get("/api/admin/webhooks", controller.ListWebhooks)
+	evo.Get("/api/admin/webhooks/:id", controller.GetWebhook)
+	evo.Post("/api/admin/webhooks", controller.CreateWebhook)
+	evo.Put("/api/admin/webhooks/:id", controller.UpdateWebhook)
+	evo.Delete("/api/admin/webhooks/:id", controller.DeleteWebhook)
+	evo.Post("/api/admin/webhooks/:id/test", controller.TestWebhook)
+
+	// Webhook delivery logs APIs
+	evo.Get("/api/admin/webhook_deliveries", controller.ListWebhookDeliveries)
+	evo.Get("/api/admin/webhook_deliveries/:id", controller.GetWebhookDelivery)
+
 	return nil
 }
 

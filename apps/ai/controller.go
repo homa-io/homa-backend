@@ -2,7 +2,6 @@ package ai
 
 import (
 	"github.com/getevo/evo/v2"
-	"github.com/google/uuid"
 	"github.com/iesreza/homa-backend/lib/response"
 )
 
@@ -98,81 +97,6 @@ func (c Controller) SummarizeHandler(req *evo.Request) interface{} {
 	return response.OK(result)
 }
 
-// GenerateResponseHandler handles POST /api/ai/generate-response
-// @Summary Generate a response using RAG
-// @Description Generates an AI response based on conversation context and knowledge base
-// @Tags AI
-// @Accept json
-// @Produce json
-// @Param body body GenerateResponseRequest true "Response generation request"
-// @Success 200 {object} GenerateResponseResponse
-// @Router /api/ai/generate-response [post]
-func (c Controller) GenerateResponseHandler(req *evo.Request) interface{} {
-	var genReq GenerateResponseRequest
-	if err := req.BodyParser(&genReq); err != nil {
-		return response.Error(response.NewErrorWithDetails(response.ErrorCodeInvalidInput, "Invalid request body", 400, err.Error()))
-	}
-
-	if len(genReq.Messages) == 0 {
-		return response.Error(response.NewErrorWithDetails(response.ErrorCodeInvalidInput, "Messages are required", 400, "messages array cannot be empty"))
-	}
-
-	result, err := GenerateResponse(genReq)
-	if err != nil {
-		return response.Error(response.NewErrorWithDetails(response.ErrorCodeInternalError, "Response generation failed", 500, err.Error()))
-	}
-
-	return response.OK(result)
-}
-
-// IndexArticleHandler handles POST /api/ai/index-article/:id
-// @Summary Index an article for RAG
-// @Description Creates embeddings for a knowledge base article
-// @Tags AI - Admin
-// @Accept json
-// @Produce json
-// @Param id path string true "Article UUID"
-// @Success 200 {object} map[string]interface{}
-// @Router /api/ai/index-article/{id} [post]
-func (c Controller) IndexArticleHandler(req *evo.Request) interface{} {
-	articleIDStr := req.Param("id").String()
-	if articleIDStr == "" {
-		return response.Error(response.NewErrorWithDetails(response.ErrorCodeInvalidInput, "Article ID is required", 400, "id parameter cannot be empty"))
-	}
-
-	articleID, err := uuid.Parse(articleIDStr)
-	if err != nil {
-		return response.Error(response.NewErrorWithDetails(response.ErrorCodeInvalidInput, "Invalid article ID", 400, err.Error()))
-	}
-
-	if err := IndexArticle(articleID); err != nil {
-		return response.Error(response.NewErrorWithDetails(response.ErrorCodeInternalError, "Indexing failed", 500, err.Error()))
-	}
-
-	return response.OK(map[string]interface{}{
-		"message":    "Article indexed successfully",
-		"article_id": articleID.String(),
-	})
-}
-
-// ReindexAllHandler handles POST /api/ai/reindex-all
-// @Summary Reindex all articles for RAG
-// @Description Creates embeddings for all published knowledge base articles
-// @Tags AI - Admin
-// @Accept json
-// @Produce json
-// @Success 200 {object} map[string]interface{}
-// @Router /api/ai/reindex-all [post]
-func (c Controller) ReindexAllHandler(req *evo.Request) interface{} {
-	if err := ReindexAllArticles(); err != nil {
-		return response.Error(response.NewErrorWithDetails(response.ErrorCodeInternalError, "Reindexing failed", 500, err.Error()))
-	}
-
-	return response.OK(map[string]interface{}{
-		"message": "All articles reindexed successfully",
-	})
-}
-
 // GetFormatsHandler handles GET /api/ai/formats
 // @Summary Get available revision formats
 // @Description Returns a list of available text revision formats
@@ -196,19 +120,60 @@ func (c Controller) GetFormatsHandler(req *evo.Request) interface{} {
 	return response.OK(formats)
 }
 
-// GetIndexStatsHandler handles GET /api/ai/index-stats
-// @Summary Get Qdrant index statistics
-// @Description Returns statistics about the knowledge base vector index
-// @Tags AI - Admin
+// GenerateArticleSummaryHandler handles POST /api/ai/generate-summary
+// @Summary Generate a summary for an article
+// @Description Generates a concise summary for a knowledge base article
+// @Tags AI
 // @Accept json
 // @Produce json
-// @Success 200 {object} map[string]interface{}
-// @Router /api/ai/index-stats [get]
-func (c Controller) GetIndexStatsHandler(req *evo.Request) interface{} {
-	stats, err := GetIndexStats()
-	if err != nil {
-		return response.Error(response.NewErrorWithDetails(response.ErrorCodeInternalError, "Failed to get index stats", 500, err.Error()))
+// @Param body body GenerateArticleSummaryRequest true "Article summary request"
+// @Success 200 {object} GenerateArticleSummaryResponse
+// @Router /api/ai/generate-summary [post]
+func (c Controller) GenerateArticleSummaryHandler(req *evo.Request) interface{} {
+	var genReq GenerateArticleSummaryRequest
+	if err := req.BodyParser(&genReq); err != nil {
+		return response.Error(response.NewErrorWithDetails(response.ErrorCodeInvalidInput, "Invalid request body", 400, err.Error()))
 	}
 
-	return response.OK(stats)
+	if genReq.Content == "" {
+		return response.Error(response.NewErrorWithDetails(response.ErrorCodeInvalidInput, "Content is required", 400, "content field cannot be empty"))
+	}
+
+	result, err := GenerateArticleSummary(genReq)
+	if err != nil {
+		return response.Error(response.NewErrorWithDetails(response.ErrorCodeInternalError, "Summary generation failed", 500, err.Error()))
+	}
+
+	return response.OK(result)
+}
+
+// SmartReplyHandler handles POST /api/ai/smart-reply
+// @Summary Smart reply - analyze, translate if needed, and fix grammar
+// @Description Analyzes agent message, compares with user language, translates if needed, and fixes grammar
+// @Tags AI
+// @Accept json
+// @Produce json
+// @Param body body SmartReplyRequest true "Smart reply request"
+// @Success 200 {object} SmartReplyResponse
+// @Router /api/ai/smart-reply [post]
+func (c Controller) SmartReplyHandler(req *evo.Request) interface{} {
+	var smartReq SmartReplyRequest
+	if err := req.BodyParser(&smartReq); err != nil {
+		return response.Error(response.NewErrorWithDetails(response.ErrorCodeInvalidInput, "Invalid request body", 400, err.Error()))
+	}
+
+	if smartReq.AgentMessage == "" {
+		return response.Error(response.NewErrorWithDetails(response.ErrorCodeInvalidInput, "Agent message is required", 400, "agent_message field cannot be empty"))
+	}
+
+	if smartReq.UserLastMessage == "" {
+		return response.Error(response.NewErrorWithDetails(response.ErrorCodeInvalidInput, "User last message is required", 400, "user_last_message field cannot be empty"))
+	}
+
+	result, err := SmartReply(smartReq)
+	if err != nil {
+		return response.Error(response.NewErrorWithDetails(response.ErrorCodeInternalError, "Smart reply failed", 500, err.Error()))
+	}
+
+	return response.OK(result)
 }

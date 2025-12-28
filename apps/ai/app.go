@@ -4,7 +4,6 @@ import (
 	"github.com/getevo/evo/v2"
 	"github.com/getevo/evo/v2/lib/log"
 	"github.com/getevo/evo/v2/lib/settings"
-	"github.com/iesreza/homa-backend/apps/models"
 )
 
 // App represents the AI application
@@ -28,15 +27,6 @@ func (a App) Register() error {
 		return err
 	}
 
-	// Initialize Qdrant client (required for RAG)
-	if err := InitQdrant(); err != nil {
-		log.Error("Failed to initialize Qdrant client: %v", err)
-		return err
-	}
-
-	// Register the indexer with the models package for GORM hooks
-	models.SetKnowledgeBaseIndexer(&ArticleIndexer{})
-
 	log.Info("AI app initialized successfully with model: %s", settings.Get("ASSISTANT.MODEL", "gpt-4o").String())
 	return nil
 }
@@ -56,13 +46,11 @@ func (a App) Router() error {
 	// Conversation summarization
 	evo.Post("/api/ai/summarize", controller.SummarizeHandler)
 
-	// RAG-based response generation
-	evo.Post("/api/ai/generate-response", controller.GenerateResponseHandler)
+	// Article summary generation
+	evo.Post("/api/ai/generate-summary", controller.GenerateArticleSummaryHandler)
 
-	// Admin endpoints for knowledge base indexing
-	evo.Post("/api/ai/index-article/:id", controller.IndexArticleHandler)
-	evo.Post("/api/ai/reindex-all", controller.ReindexAllHandler)
-	evo.Get("/api/ai/index-stats", controller.GetIndexStatsHandler)
+	// Smart reply - analyze, translate if needed, and fix grammar
+	evo.Post("/api/ai/smart-reply", controller.SmartReplyHandler)
 
 	return nil
 }

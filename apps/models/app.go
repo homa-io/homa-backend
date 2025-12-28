@@ -30,6 +30,7 @@ func (a App) Register() error {
 	db.UseModel(KnowledgeBaseTag{})
 	db.UseModel(KnowledgeBaseArticleTag{})
 	db.UseModel(KnowledgeBaseChunk{})
+	db.UseModel(KnowledgeBaseMedia{})
 
 	return nil
 }
