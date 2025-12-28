@@ -117,7 +117,6 @@ func (c *Conversation) AfterCreate(tx *gorm.DB) error {
 		if err := db.Preload("Client").Preload("Client.ExternalIDs").First(&conversation, c.ID).Error; err == nil {
 			BroadcastWebhook(WebhookEventConversationCreated, map[string]any{
 				"conversation": conversation,
-				"client":       conversation.Client,
 			})
 		} else {
 			// Fallback with just the conversation
@@ -160,7 +159,6 @@ func (c *Conversation) AfterUpdate(tx *gorm.DB) error {
 				if oldConv.Status != c.Status {
 					BroadcastWebhook(WebhookEventConversationStatusChange, map[string]any{
 						"conversation": conversation,
-						"client":       conversation.Client,
 						"old_status":   oldConv.Status,
 						"new_status":   c.Status,
 					})
@@ -171,7 +169,6 @@ func (c *Conversation) AfterUpdate(tx *gorm.DB) error {
 			if c.Status == ConversationStatusClosed {
 				BroadcastWebhook(WebhookEventConversationClosed, map[string]any{
 					"conversation": conversation,
-					"client":       conversation.Client,
 				})
 			}
 		}
@@ -179,7 +176,6 @@ func (c *Conversation) AfterUpdate(tx *gorm.DB) error {
 		// Trigger general update webhook with full conversation entity
 		BroadcastWebhook(WebhookEventConversationUpdated, map[string]any{
 			"conversation": conversation,
-			"client":       conversation.Client,
 		})
 	}()
 
@@ -224,7 +220,6 @@ func (m *Message) AfterCreate(tx *gorm.DB) error {
 			BroadcastWebhook(WebhookEventMessageCreated, map[string]any{
 				"message":      m,
 				"conversation": conversation,
-				"client":       conversation.Client,
 			})
 		} else {
 			// Fallback if conversation fetch fails
