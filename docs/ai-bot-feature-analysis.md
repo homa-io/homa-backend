@@ -6,6 +6,109 @@ This document analyzes the proposed AI bot features for Homa and provides archit
 
 ---
 
+## 0. Go Libraries & Tools
+
+This section lists the recommended Go libraries for implementing the AI bot features.
+
+### 0.1 OpenAI Client
+
+| Library | URL | Notes |
+|---------|-----|-------|
+| **openai-go (Official)** | [github.com/openai/openai-go](https://github.com/openai/openai-go) | Official OpenAI library, streaming support, function calling |
+| **go-openai** | [github.com/sashabaranov/go-openai](https://github.com/sashabaranov/go-openai) | Popular community library, 2800+ projects use it, GPT-4o support |
+
+**Recommendation**: Use `sashabaranov/go-openai` - mature, well-documented, supports function calling.
+
+```go
+import "github.com/sashabaranov/go-openai"
+
+client := openai.NewClient("your-api-key")
+resp, err := client.CreateChatCompletion(ctx, openai.ChatCompletionRequest{
+    Model: openai.GPT4,
+    Messages: []openai.ChatCompletionMessage{
+        {Role: openai.ChatMessageRoleSystem, Content: systemPrompt},
+        {Role: openai.ChatMessageRoleUser, Content: userMessage},
+    },
+    Functions: functions, // For JS Func calling
+})
+```
+
+### 0.2 Vector Database (Qdrant)
+
+| Library | URL | Notes |
+|---------|-----|-------|
+| **go-client (Official)** | [github.com/qdrant/go-client](https://github.com/qdrant/go-client) | Official Qdrant Go client, gRPC-based |
+
+```go
+import "github.com/qdrant/go-client/qdrant"
+
+client, err := qdrant.NewClient(&qdrant.Config{
+    Host: "localhost",
+    Port: 6334,
+})
+```
+
+### 0.3 Language Detection
+
+| Library | URL | Accuracy | Languages |
+|---------|-----|----------|-----------|
+| **lingua-go** | [github.com/pemistahl/lingua-go](https://github.com/pemistahl/lingua-go) | Highest | 75 languages |
+| **whatlanggo** | [github.com/abadojack/whatlanggo](https://github.com/abadojack/whatlanggo) | Good | 80+ languages |
+| **go-lang-detector** | [github.com/chrisport/go-lang-detector](https://github.com/chrisport/go-lang-detector) | Medium | 7 languages |
+
+**Recommendation**: Use `lingua-go` - most accurate, works well with short text, offline, 75 languages.
+
+```go
+import "github.com/pemistahl/lingua-go"
+
+detector := lingua.NewLanguageDetectorBuilder().
+    FromAllLanguages().
+    WithPreloadedLanguageModels().
+    Build()
+
+language, exists := detector.DetectLanguageOf("مرحبا، چگونه می‌توانم کمکتان کنم؟")
+// Returns: Persian
+```
+
+### 0.4 JavaScript Runtime (Goja)
+
+| Library | URL | Notes |
+|---------|-----|-------|
+| **goja** | [github.com/dop251/goja](https://github.com/dop251/goja) | Pure Go ES5.1 interpreter |
+| **goja_nodejs** | [github.com/dop251/goja_nodejs](https://github.com/dop251/goja_nodejs) | Node.js compatibility (require, console, etc.) |
+| **commonjs-goja** | [github.com/tliron/commonjs-goja](https://pkg.go.dev/github.com/tliron/commonjs-goja) | CommonJS module support |
+
+**For external/npm libraries**: Bundle with webpack/esbuild to ES5, then load into goja.
+
+```go
+import (
+    "github.com/dop251/goja"
+    "github.com/dop251/goja_nodejs/require"
+)
+
+registry := require.NewRegistry()
+vm := goja.New()
+registry.Enable(vm)
+
+// Load bundled external library
+vm.RunString(bundledLibraryCode)
+
+// Execute function
+result, err := vm.RunString(`myFunction(input)`)
+```
+
+### 0.5 Additional Utilities
+
+| Purpose | Library | URL |
+|---------|---------|-----|
+| HTML to Text | `github.com/jaytaylor/html2text` | Clean KB articles |
+| Markdown Parser | `github.com/yuin/goldmark` | Parse markdown content |
+| Text Tokenizer | `github.com/pkoukk/tiktoken-go` | Count OpenAI tokens |
+| UUID | `github.com/google/uuid` | Generate IDs |
+| Sentiment Analysis | `github.com/cdipaolo/sentiment` | Basic sentiment detection |
+
+---
+
 ## 1. Current System Understanding
 
 ### 1.1 Existing Architecture
@@ -93,38 +196,110 @@ Client Message → POST /api/client/conversations/{id}/{secret}/messages
 **Data Models Required**:
 
 ```go
-// AIConfiguration - Per department or global AI settings
+// AIConfiguration - Global AI settings (singleton, only one record)
 type AIConfiguration struct {
     ID              uint   `gorm:"primaryKey"`
-    DepartmentID    *uint  `gorm:"index"` // null = global default
-    Enabled         bool
-    Provider        string // "openai", "anthropic", "azure_openai"
+
+    // MASTER SWITCH - If false, AI features completely disabled
+    GlobalEnabled   bool   `gorm:"default:false"` // Master on/off switch
+
+    // Provider settings
+    Provider        string // "openai" (only openai supported initially)
     Model           string // "gpt-4", "gpt-4-turbo", "gpt-3.5-turbo"
     APIKey          string `json:"-"` // Encrypted storage
     Temperature     float32
     MaxTokens       int
-    SystemPrompt    string // Base system prompt
-    ToneInstructions string // Tone configuration
-    BehaviorGuide   string // How AI should behave
-    MaxHistoryMsgs  int    // How many messages to include as context
+
+    // System Prompt (editable from dashboard)
+    SystemPromptTemplate string `gorm:"type:text"` // User-editable system prompt
+
+    // Feature toggles
     EnableKB        bool   // Use knowledge base for RAG
     EnableJSFunc    bool   // Allow JS function calls
     EnableWorkflows bool   // Enable visual workflows
-    HandoverTriggers string // JSON: conditions for human handover
+
+    // Defaults
+    DefaultKBLanguage string // Default KB language (e.g., "it" for Italian)
+    MaxHistoryMsgs    int    // How many messages to include as context
+
     CreatedAt       time.Time
     UpdatedAt       time.Time
 }
 
 // AIConversationState - Track AI state per conversation
 type AIConversationState struct {
-    ConversationID uint   `gorm:"primaryKey"`
-    Mode           string // "ai", "human", "hybrid"
-    WorkflowID     *uint  // Current workflow if any
-    WorkflowState  string // JSON: current workflow state
-    HandoverReason *string
-    HandoverAt     *time.Time
-    AIMessageCount int
-    LastAIResponse time.Time
+    ConversationID   uint   `gorm:"primaryKey"`
+    Mode             string // "ai", "human", "hybrid"
+
+    // Language (detected from FIRST message only)
+    DetectedLanguage string // ISO 639-1 code (e.g., "fa", "en", "it")
+    LanguageDetectedAt *time.Time
+
+    // Workflow state
+    WorkflowID       *uint  // Current workflow if any
+    WorkflowState    string // JSON: current workflow state
+
+    // Handover tracking
+    HandoverReason   *string
+    HandoverAt       *time.Time
+
+    // Stats
+    AIMessageCount   int
+    LastAIResponse   time.Time
+}
+```
+
+**Language Detection Flow** (First message only):
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                    Language Detection (First Message)            │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                  │
+│  First Client Message in Conversation                           │
+│       ↓                                                          │
+│  Check: AIConversationState.DetectedLanguage exists?            │
+│       │                                                          │
+│       ├─→ [Yes] ─→ Use stored language                          │
+│       │                                                          │
+│       └─→ [No] ─→ Detect language using lingua-go               │
+│                   Store in AIConversationState.DetectedLanguage │
+│                   Set LanguageDetectedAt = now()                │
+│                   Use detected language for ALL future messages │
+│                                                                  │
+│  Result: Conversation language is fixed from first message      │
+│                                                                  │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+```go
+// Language detection happens ONCE per conversation
+func (l *LanguageManager) GetOrDetectLanguage(conversationID uint, firstMessage string) string {
+    var state AIConversationState
+    db.FirstOrCreate(&state, AIConversationState{ConversationID: conversationID})
+
+    // If already detected, return stored language
+    if state.DetectedLanguage != "" {
+        return state.DetectedLanguage
+    }
+
+    // Detect from first message using lingua-go
+    detector := lingua.NewLanguageDetectorBuilder().
+        FromAllLanguages().
+        Build()
+
+    lang, exists := detector.DetectLanguageOf(firstMessage)
+    if !exists {
+        lang = lingua.English // fallback
+    }
+
+    // Store and never change again
+    now := time.Now()
+    state.DetectedLanguage = lang.IsoCode639_1().String()
+    state.LanguageDetectedAt = &now
+    db.Save(&state)
+
+    return state.DetectedLanguage
 }
 ```
 
@@ -132,9 +307,8 @@ type AIConversationState struct {
 
 1. **Rate Limiting**: Add per-client rate limiting to prevent API abuse
 2. **Cost Control**: Track token usage per department/conversation
-3. **Fallback Chain**: OpenAI → Anthropic → Azure (configurable)
-4. **Caching**: Cache frequent KB queries to reduce Qdrant calls
-5. **Streaming**: Consider SSE/WebSocket streaming for long responses
+3. **Caching**: Cache frequent KB queries to reduce Qdrant calls
+4. **Streaming**: Consider SSE/WebSocket streaming for long responses
 
 ---
 
@@ -589,86 +763,39 @@ type AIPersonality struct {
 
 **Critique & Improvements**:
 
-1. **A/B Testing**: Support multiple personalities for testing
-2. **Department Override**: Different personality per department
-3. **Time-based**: Different tone for business hours vs after-hours
-4. **Learning**: Track which responses get positive feedback
-5. **Version Control**: Keep history of prompt changes
+1. **Department Override**: Different personality per department
+2. **Time-based**: Different tone for business hours vs after-hours
+3. **Learning**: Track which responses get positive feedback
 
 ---
 
-### 2.6 Feature: JS Func - JavaScript Tool Integration
+### 2.6 Feature: JS Func - JavaScript Tool Integration (Goja Runtime)
 
 **Requirement**: Install JavaScript tools that AI can call.
 
-**CRITICAL ANALYSIS - This is the most complex feature**
+**Runtime: Goja (Pure Go JavaScript Interpreter)**
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
-│                    JS Func Architecture                          │
+│                    JS Func Architecture (Goja)                   │
 ├─────────────────────────────────────────────────────────────────┤
 │                                                                  │
-│  Challenge: Running untrusted JS securely in a Go backend        │
+│  Libraries Used:                                                │
+│  - github.com/dop251/goja         (ES5.1 interpreter)           │
+│  - github.com/dop251/goja_nodejs  (require(), console, etc.)    │
 │                                                                  │
-│  Option A: Embedded V8/QuickJS (goja)                           │
-│  ┌─────────────────────────────────────────────────────────────┐│
-│  │  Pros:                                                       ││
-│  │  - Fast execution                                            ││
-│  │  - No network overhead                                       ││
-│  │  - Full control over runtime                                 ││
-│  │                                                              ││
-│  │  Cons:                                                       ││
-│  │  - Security sandbox is complex                               ││
-│  │  - Memory limits hard to enforce                             ││
-│  │  - No npm ecosystem access                                   ││
-│  │                                                              ││
-│  │  Libraries: github.com/dop251/goja (pure Go JS interpreter) ││
-│  └─────────────────────────────────────────────────────────────┘│
+│  Features:                                                      │
+│  ✓ Pure Go - no external dependencies                           │
+│  ✓ Fast execution (in-process)                                  │
+│  ✓ Custom library import support                                │
+│  ✓ External npm libraries (bundled to ES5)                      │
+│  ✓ Go function injection                                        │
+│  ✓ Configurable trigger conditions                              │
 │                                                                  │
-│  Option B: Isolated Deno Runtime (RECOMMENDED)                  │
-│  ┌─────────────────────────────────────────────────────────────┐│
-│  │  Pros:                                                       ││
-│  │  - Built-in security sandbox                                 ││
-│  │  - TypeScript support                                        ││
-│  │  - Permission-based (--allow-net, --allow-read)             ││
-│  │  - npm compatibility                                         ││
-│  │                                                              ││
-│  │  Cons:                                                       ││
-│  │  - Subprocess overhead                                       ││
-│  │  - Deno must be installed                                    ││
-│  │                                                              ││
-│  │  Execution: deno run --allow-net=api.example.com script.ts  ││
-│  └─────────────────────────────────────────────────────────────┘│
-│                                                                  │
-│  Option C: Cloudflare Workers / AWS Lambda                      │
-│  ┌─────────────────────────────────────────────────────────────┐│
-│  │  Pros:                                                       ││
-│  │  - Complete isolation                                        ││
-│  │  - Horizontally scaled automatically                         ││
-│  │  - Built-in security                                         ││
-│  │                                                              ││
-│  │  Cons:                                                       ││
-│  │  - Network latency                                           ││
-│  │  - External dependency                                       ││
-│  │  - Cost per execution                                        ││
-│  │                                                              ││
-│  └─────────────────────────────────────────────────────────────┘│
-│                                                                  │
-│  Option D: Docker Container Execution                           │
-│  ┌─────────────────────────────────────────────────────────────┐│
-│  │  Pros:                                                       ││
-│  │  - Full isolation                                            ││
-│  │  - Any runtime (Node, Deno, Bun)                            ││
-│  │  - Resource limits (CPU, memory, network)                    ││
-│  │                                                              ││
-│  │  Cons:                                                       ││
-│  │  - Container startup overhead                                ││
-│  │  - Complex orchestration                                     ││
-│  │                                                              ││
-│  │  Can use: Docker API or lightweight container (gVisor)       ││
-│  └─────────────────────────────────────────────────────────────┘│
-│                                                                  │
-│  RECOMMENDATION: Deno for development, Docker for production    │
+│  Limitations:                                                   │
+│  - ES5.1 only (use bundler for ES6+)                           │
+│  - Single-threaded per runtime instance                         │
+│  - No native async/await (use callbacks or bundle)              │
 │                                                                  │
 └─────────────────────────────────────────────────────────────────┘
 ```
@@ -684,30 +811,27 @@ type JSFunc struct {
     Description     string // For AI to understand when to use
     Category        string // "orders", "payments", "shipping"
 
-    // Code
-    Code            string // JavaScript/TypeScript source
-    Runtime         string // "deno", "node", "goja"
+    // Code (ES5 JavaScript)
+    Code            string `gorm:"type:text"` // JavaScript source code
 
     // Input/Output Schema (JSON Schema format)
-    InputSchema     string // JSON Schema for input validation
-    OutputSchema    string // JSON Schema for output validation
+    InputSchema     string `gorm:"type:text"` // JSON Schema for input validation
+    OutputSchema    string `gorm:"type:text"` // JSON Schema for output validation
 
-    // OpenAI Function Calling format
-    FunctionDef     string // JSON: {name, description, parameters}
+    // OpenAI Function Calling format (auto-generated from schemas)
+    FunctionDef     string `gorm:"type:text"` // JSON: {name, description, parameters}
 
-    // Permissions (for Deno)
-    AllowNet        string // Comma-separated domains
-    AllowRead       string // Comma-separated paths
-    AllowEnv        string // Comma-separated env vars
+    // Dependencies (bundled external libraries)
+    Dependencies    string `gorm:"type:text"` // JSON array of JSLibrary IDs to load
+
+    // Trigger Conditions - WHEN can this function be called
+    TriggerRules    string `gorm:"type:text"` // JSON: trigger configuration (see below)
 
     // Execution limits
-    TimeoutMs       int    // Max execution time
-    MaxMemoryMB     int    // Max memory usage
+    TimeoutMs       int    `gorm:"default:5000"`  // Max execution time (default 5s)
 
     // State
-    Enabled         bool
-    Version         int
-    LastModified    time.Time
+    Enabled         bool   `gorm:"default:true"`
     LastExecutedAt  *time.Time
     ExecutionCount  int64
     ErrorCount      int64
@@ -716,20 +840,242 @@ type JSFunc struct {
     UpdatedAt       time.Time
 }
 
+// JSLibrary - Reusable JavaScript library (custom or external npm bundled)
+type JSLibrary struct {
+    ID              string `gorm:"primaryKey"` // UUID
+    Name            string `gorm:"uniqueIndex"` // "axios", "lodash", "my-utils"
+    DisplayName     string // "Axios HTTP Client"
+    Description     string
+
+    // Library Code (ES5 bundled)
+    Code            string `gorm:"type:text"` // Bundled JavaScript code
+
+    // Source info (for documentation)
+    SourceType      string // "npm", "custom", "url"
+    SourceURL       string // npm package name or URL
+    SourceVersion   string // e.g., "1.6.0"
+
+    // Exported globals (what this library provides)
+    ExportedGlobals string // JSON array: ["axios", "http"]
+
+    Enabled         bool   `gorm:"default:true"`
+    CreatedAt       time.Time
+    UpdatedAt       time.Time
+}
+
+// JSFuncTriggerRule - When a function can be called
+type JSFuncTriggerRule struct {
+    ID              uint   `gorm:"primaryKey"`
+    FuncID          string `gorm:"index"` // JSFunc ID
+
+    // Trigger conditions (all must match)
+    TriggerType     string // "intent", "keyword", "workflow", "always", "manual"
+
+    // For "intent" type
+    Intents         string // JSON array: ["order_status", "track_order"]
+
+    // For "keyword" type
+    Keywords        string // JSON array: ["order", "tracking", "delivery"]
+
+    // For "workflow" type
+    WorkflowIDs     string // JSON array of workflow IDs that can call this func
+
+    // Context conditions
+    RequireKBMatch  bool   // Only call if KB returned relevant results
+    MinConfidence   float32 // AI must have this confidence to call (0-1)
+
+    // Response handling
+    ResponseMode    string // "direct" (show to user) or "ai_process" (AI interprets first)
+
+    Priority        int    // Higher = checked first
+    Enabled         bool   `gorm:"default:true"`
+}
+
 // JSFuncExecution - Audit log of executions
 type JSFuncExecution struct {
     ID              uint   `gorm:"primaryKey"`
     FuncID          string `gorm:"index"`
     ConversationID  uint   `gorm:"index"`
 
-    Input           string // JSON input
-    Output          string // JSON output
+    Input           string `gorm:"type:text"` // JSON input
+    Output          string `gorm:"type:text"` // JSON output
     Error           *string
 
+    TriggerType     string // How was it triggered
     DurationMs      int
     Success         bool
 
     CreatedAt       time.Time
+}
+```
+
+**Trigger Rules Configuration**:
+
+```json
+{
+  "trigger_rules": [
+    {
+      "type": "intent",
+      "intents": ["order_status", "track_order", "where_is_my_order"],
+      "response_mode": "ai_process",
+      "min_confidence": 0.7
+    },
+    {
+      "type": "keyword",
+      "keywords": ["order number", "tracking", "ORD-"],
+      "response_mode": "direct"
+    },
+    {
+      "type": "workflow",
+      "workflow_ids": ["order_inquiry_flow"],
+      "response_mode": "direct"
+    }
+  ]
+}
+```
+
+**Importing Custom & External Libraries**:
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                    Library Import System                         │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                  │
+│  Option 1: Custom Library (written directly)                    │
+│  ┌─────────────────────────────────────────────────────────────┐│
+│  │  // Create JSLibrary record with custom code                 ││
+│  │  {                                                           ││
+│  │    "name": "my-utils",                                       ││
+│  │    "source_type": "custom",                                  ││
+│  │    "code": "var MyUtils = { formatDate: function(d) {...} }",││
+│  │    "exported_globals": ["MyUtils"]                           ││
+│  │  }                                                           ││
+│  └─────────────────────────────────────────────────────────────┘│
+│                                                                  │
+│  Option 2: NPM Package (bundled with esbuild/webpack)           │
+│  ┌─────────────────────────────────────────────────────────────┐│
+│  │  Step 1: Bundle npm package to ES5                           ││
+│  │  $ npx esbuild axios --bundle --format=iife --global-name=   ││
+│  │    axios --target=es5 --outfile=axios.bundle.js              ││
+│  │                                                              ││
+│  │  Step 2: Upload bundled code as JSLibrary                    ││
+│  │  {                                                           ││
+│  │    "name": "axios",                                          ││
+│  │    "source_type": "npm",                                     ││
+│  │    "source_url": "axios",                                    ││
+│  │    "source_version": "1.6.0",                                ││
+│  │    "code": "<bundled axios code>",                           ││
+│  │    "exported_globals": ["axios"]                             ││
+│  │  }                                                           ││
+│  └─────────────────────────────────────────────────────────────┘│
+│                                                                  │
+│  Option 3: URL Import (fetch and cache)                         │
+│  ┌─────────────────────────────────────────────────────────────┐│
+│  │  {                                                           ││
+│  │    "name": "lodash",                                         ││
+│  │    "source_type": "url",                                     ││
+│  │    "source_url": "https://cdn.jsdelivr.net/npm/lodash/...",  ││
+│  │    "exported_globals": ["_"]                                 ││
+│  │  }                                                           ││
+│  │  // System fetches URL on save and stores in code field      ││
+│  └─────────────────────────────────────────────────────────────┘│
+│                                                                  │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+**Goja Runtime Implementation**:
+
+```go
+// In apps/ai/jsfunc/executor.go
+
+type JSFuncExecutor struct {
+    libraries map[string]*JSLibrary // Preloaded libraries
+}
+
+func (e *JSFuncExecutor) Execute(fn *JSFunc, input map[string]interface{}) (interface{}, error) {
+    // Create new runtime for each execution (isolation)
+    vm := goja.New()
+
+    // Enable require() and console
+    registry := require.NewRegistry()
+    registry.Enable(vm)
+
+    // Inject console.log
+    console := vm.NewObject()
+    console.Set("log", func(call goja.FunctionCall) goja.Value {
+        // Log to execution audit
+        return goja.Undefined()
+    })
+    vm.Set("console", console)
+
+    // Load dependencies (libraries)
+    if fn.Dependencies != "" {
+        var depIDs []string
+        json.Unmarshal([]byte(fn.Dependencies), &depIDs)
+        for _, libID := range depIDs {
+            if lib, ok := e.libraries[libID]; ok {
+                _, err := vm.RunString(lib.Code)
+                if err != nil {
+                    return nil, fmt.Errorf("failed to load library %s: %w", lib.Name, err)
+                }
+            }
+        }
+    }
+
+    // Inject Go functions (HTTP client, etc.)
+    e.injectGoFunctions(vm)
+
+    // Inject input
+    vm.Set("input", input)
+
+    // Execute with timeout
+    ctx, cancel := context.WithTimeout(context.Background(),
+        time.Duration(fn.TimeoutMs)*time.Millisecond)
+    defer cancel()
+
+    // Run the function code
+    resultCh := make(chan goja.Value, 1)
+    errCh := make(chan error, 1)
+
+    go func() {
+        result, err := vm.RunString(fn.Code + "\n; main(input);")
+        if err != nil {
+            errCh <- err
+        } else {
+            resultCh <- result
+        }
+    }()
+
+    select {
+    case result := <-resultCh:
+        return result.Export(), nil
+    case err := <-errCh:
+        return nil, err
+    case <-ctx.Done():
+        vm.Interrupt("timeout")
+        return nil, errors.New("execution timeout")
+    }
+}
+
+// Inject helpful Go functions into JS runtime
+func (e *JSFuncExecutor) injectGoFunctions(vm *goja.Runtime) {
+    // HTTP client
+    http := vm.NewObject()
+    http.Set("get", func(url string) map[string]interface{} {
+        resp, _ := httpClient.Get(url)
+        // ... parse and return
+    })
+    http.Set("post", func(url string, body interface{}) map[string]interface{} {
+        // ... implementation
+    })
+    vm.Set("http", http)
+
+    // Database query (read-only)
+    db := vm.NewObject()
+    db.Set("query", func(sql string, args ...interface{}) []map[string]interface{} {
+        // Execute read-only query and return results
+    })
+    vm.Set("db", db)
 }
 ```
 
@@ -1337,7 +1683,7 @@ Based on my analysis, here are additional features to consider:
 
 | Concern | Risk | Mitigation |
 |---------|------|------------|
-| **JS Func Security** | Code injection, resource abuse | Use Deno sandbox with strict permissions |
+| **JS Func Security** | Code injection, resource abuse | Use Goja with timeout + limited Go function injection |
 | **AI Costs** | OpenAI API costs can explode | Implement token budgets per department |
 | **Latency** | Multiple API calls (embed, search, LLM) | Parallel execution, caching, streaming |
 | **Data Privacy** | Customer data sent to OpenAI | Azure OpenAI in your region, PII filtering |
@@ -1357,7 +1703,7 @@ Based on my analysis, here are additional features to consider:
 6. RAG implementation
 
 **Phase 3 - Advanced Features (Weeks 9-12)**
-7. JS Func runtime (Deno)
+7. JS Func runtime (Goja)
 8. Basic workflow engine
 9. Handover system
 
@@ -1373,7 +1719,7 @@ Based on my analysis, here are additional features to consider:
 | **Vector DB** | Qdrant | Pinecone, Weaviate, Milvus |
 | **LLM Provider** | OpenAI GPT-4 | Anthropic Claude, Azure OpenAI |
 | **Embeddings** | text-embedding-3-small | Cohere, local models |
-| **JS Runtime** | Deno | goja (embedded), Docker |
+| **JS Runtime** | Goja (embedded) | goja_nodejs for require() support |
 | **Workflow Storage** | JSON in MySQL | Temporal.io, separate workflow engine |
 | **Translation** | GPT-4 (inline) | DeepL, Google Translate |
 
@@ -2070,7 +2416,7 @@ All conditions that trigger handover to human:
 | Task | Description | Dependencies |
 |------|-------------|--------------|
 | 4.1 | Create `JSFunc` and `JSFuncExecution` models | Phase 1 |
-| 4.2 | Implement Deno runtime executor | 4.1 |
+| 4.2 | Implement Goja runtime executor | 4.1 |
 | 4.3 | Implement input/output schema validation | 4.2 |
 | 4.4 | Create OpenAI function calling integration | 4.3 |
 | 4.5 | Implement secret injection for JS Funcs | 4.2 |
@@ -2104,7 +2450,7 @@ All conditions that trigger handover to human:
 | 7.1 | Create AI analytics models | All phases |
 | 7.2 | Implement dashboard for AI metrics | 7.1 |
 | 7.3 | Add cost tracking reports | 7.1 |
-| 7.4 | Implement A/B testing for prompts | 7.1 |
+| 7.4 | Implement prompt effectiveness tracking | 7.1 |
 | 7.5 | Add KB gap detection | 2.5, 7.1 |
 
 ---
@@ -2293,33 +2639,38 @@ ai.timeout.occurred         # Response timeout
 
 ## 11. Security Considerations
 
-### JS Func Sandboxing
+### JS Func Sandboxing (Goja)
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
-│                    JS Func Security Layers                       │
+│                    JS Func Security Layers (Goja)                │
 ├─────────────────────────────────────────────────────────────────┤
 │                                                                  │
-│  Layer 1: Deno Permissions                                      │
-│  - --allow-net=specific.domains.only                            │
-│  - --allow-read=/specific/paths                                 │
-│  - --allow-env=SPECIFIC_VARS                                    │
-│  - --no-prompt (deny interactive permissions)                   │
+│  Layer 1: Limited Go Function Injection                         │
+│  - Only inject specific, safe Go functions                      │
+│  - HTTP client with domain whitelist                            │
+│  - Read-only database queries only                              │
+│  - No file system access                                        │
 │                                                                  │
-│  Layer 2: Resource Limits                                       │
-│  - Timeout enforcement (kill after X seconds)                   │
-│  - Memory limit (via cgroups/Docker)                            │
-│  - CPU limit (via cgroups/Docker)                               │
+│  Layer 2: Execution Limits                                      │
+│  - Timeout enforcement (vm.Interrupt after X seconds)           │
+│  - New runtime per execution (isolation)                        │
+│  - No persistent state between executions                       │
 │                                                                  │
-│  Layer 3: Network Isolation                                     │
-│  - Whitelist external API domains                               │
-│  - Block internal network access                                │
-│  - No localhost/127.0.0.1 access                                │
+│  Layer 3: Input/Output Validation                               │
+│  - JSON Schema validation for input                             │
+│  - JSON Schema validation for output                            │
+│  - Sanitize all external data                                   │
 │                                                                  │
 │  Layer 4: Secret Management                                     │
-│  - Secrets injected as environment variables                    │
+│  - Secrets injected via Go functions (not JS vars)              │
 │  - Never logged or stored in output                             │
 │  - Encrypted at rest                                            │
+│                                                                  │
+│  Layer 5: Code Review                                           │
+│  - Admin approval for new JS functions                          │
+│  - Audit log of all executions                                  │
+│  - Error tracking and alerting                                  │
 │                                                                  │
 └─────────────────────────────────────────────────────────────────┘
 ```
@@ -2333,18 +2684,400 @@ ai.timeout.occurred         # Response timeout
 
 ---
 
-## 12. Summary
+## 12. Admin Dashboard UI Requirements
+
+All AI features should be configurable from the admin dashboard.
+
+### 12.1 AI Configuration Page
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│  AI Bot Settings                                     [Save]     │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                  │
+│  ┌─────────────────────────────────────────────────────────────┐│
+│  │  Master Switch                                               ││
+│  │  [●] Enable AI Bot                                          ││
+│  │  When disabled, all AI features are turned off               ││
+│  └─────────────────────────────────────────────────────────────┘│
+│                                                                  │
+│  ┌─────────────────────────────────────────────────────────────┐│
+│  │  OpenAI Configuration                                        ││
+│  │                                                              ││
+│  │  API Key:        [••••••••••••••••••••••]  [Show/Hide]      ││
+│  │  Model:          [GPT-4 Turbo        ▼]                     ││
+│  │  Temperature:    [0.7___________] (0-1)                     ││
+│  │  Max Tokens:     [1000__________]                           ││
+│  │  History Limit:  [20____________] messages                  ││
+│  └─────────────────────────────────────────────────────────────┘│
+│                                                                  │
+│  ┌─────────────────────────────────────────────────────────────┐│
+│  │  Feature Toggles                                             ││
+│  │                                                              ││
+│  │  [✓] Enable Knowledge Base (RAG)                            ││
+│  │  [✓] Enable JS Functions                                    ││
+│  │  [✓] Enable Workflows                                       ││
+│  └─────────────────────────────────────────────────────────────┘│
+│                                                                  │
+│  ┌─────────────────────────────────────────────────────────────┐│
+│  │  System Prompt Template                          [Preview]   ││
+│  │  ┌─────────────────────────────────────────────────────────┐││
+│  │  │ You are {company_name}'s AI support assistant.          │││
+│  │  │                                                          │││
+│  │  │ Always respond in {detected_language}.                   │││
+│  │  │ Use the knowledge base context below to help users.      │││
+│  │  │                                                          │││
+│  │  │ Be professional, helpful, and concise.                   │││
+│  │  │ If you cannot help, offer to connect with a human agent. │││
+│  │  │                                                          │││
+│  │  │ Available variables:                                     │││
+│  │  │ - {company_name}                                         │││
+│  │  │ - {detected_language}                                    │││
+│  │  │ - {client_name}                                          │││
+│  │  │ - {kb_context}                                           │││
+│  │  └─────────────────────────────────────────────────────────┘││
+│  └─────────────────────────────────────────────────────────────┘│
+│                                                                  │
+│  ┌─────────────────────────────────────────────────────────────┐│
+│  │  Default KB Language: [Italian         ▼]                   ││
+│  └─────────────────────────────────────────────────────────────┘│
+│                                                                  │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+### 12.2 Budget & Timeout Settings Page
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│  Budget & Timeout Settings                           [Save]     │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                  │
+│  ┌─────────────────────────────────────────────────────────────┐│
+│  │  Cost Limits                                                 ││
+│  │                                                              ││
+│  │  Max Cost per Conversation:     $[1.00____] USD             ││
+│  │  Max Tokens per Conversation:   [50000____]                 ││
+│  │  Max Daily Cost:                $[100.00__] USD             ││
+│  │  Warning Threshold:             [80_______] %               ││
+│  │                                                              ││
+│  │  [✓] Handover to human when budget exceeded                 ││
+│  │                                                              ││
+│  │  Budget Exceeded Message:                                    ││
+│  │  [I've reached my limit. Let me connect you with...]        ││
+│  └─────────────────────────────────────────────────────────────┘│
+│                                                                  │
+│  ┌─────────────────────────────────────────────────────────────┐│
+│  │  Timeout Settings                                            ││
+│  │                                                              ││
+│  │  Response Timeout:        [120_______] seconds              ││
+│  │  OpenAI Request Timeout:  [60________] seconds              ││
+│  │  Qdrant Search Timeout:   [10________] seconds              ││
+│  │  JS Func Timeout:         [30________] seconds              ││
+│  │                                                              ││
+│  │  [✓] Handover to human on timeout                           ││
+│  │                                                              ││
+│  │  Timeout Message:                                            ││
+│  │  [I apologize for the delay. A human agent will...]         ││
+│  └─────────────────────────────────────────────────────────────┘│
+│                                                                  │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+### 12.3 Handover Settings Page
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│  Handover Configuration                              [Save]     │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                  │
+│  ┌─────────────────────────────────────────────────────────────┐│
+│  │  Explicit Handover Keywords                                  ││
+│  │                                                              ││
+│  │  [human] [agent] [person] [transfer] [help] [+Add]          ││
+│  │                                                              ││
+│  │  These keywords trigger immediate handover when detected     ││
+│  └─────────────────────────────────────────────────────────────┘│
+│                                                                  │
+│  ┌─────────────────────────────────────────────────────────────┐│
+│  │  Frustration Detection                                       ││
+│  │                                                              ││
+│  │  [✓] Enable sentiment analysis                              ││
+│  │  Sentiment Threshold: [0.7_______] (0-1, higher = handover) ││
+│  │                                                              ││
+│  │  Detected signals: ALL CAPS, profanity, "!!!", negativity   ││
+│  └─────────────────────────────────────────────────────────────┘│
+│                                                                  │
+│  ┌─────────────────────────────────────────────────────────────┐│
+│  │  AI Failure Detection                                        ││
+│  │                                                              ││
+│  │  Max AI Attempts:       [3_________] before handover        ││
+│  │  Confidence Threshold:  [0.5_______] (handover if below)    ││
+│  │                                                              ││
+│  │  [✓] Handover when no KB results found                      ││
+│  │  [✓] Generate AI summary for agent                          ││
+│  └─────────────────────────────────────────────────────────────┘│
+│                                                                  │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+### 12.4 JS Functions Management Page
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│  JS Functions                                    [+ New Function]│
+├─────────────────────────────────────────────────────────────────┤
+│                                                                  │
+│  ┌─────────────────────────────────────────────────────────────┐│
+│  │  Search: [____________________]  Category: [All        ▼]   ││
+│  └─────────────────────────────────────────────────────────────┘│
+│                                                                  │
+│  ┌─────────────────────────────────────────────────────────────┐│
+│  │  ○ get_order_status          Orders       [Edit] [Test] [⋮]││
+│  │    Get the current status of a customer order               ││
+│  │    Executions: 1,234  |  Errors: 12  |  Last: 5 min ago     ││
+│  ├─────────────────────────────────────────────────────────────┤│
+│  │  ○ check_inventory           Products     [Edit] [Test] [⋮]││
+│  │    Check product availability in warehouse                  ││
+│  │    Executions: 567   |  Errors: 3   |  Last: 1 hour ago     ││
+│  ├─────────────────────────────────────────────────────────────┤│
+│  │  ○ create_ticket             Support      [Edit] [Test] [⋮]││
+│  │    Create a support ticket in external system               ││
+│  │    Executions: 89    |  Errors: 0   |  Last: 2 days ago     ││
+│  └─────────────────────────────────────────────────────────────┘│
+│                                                                  │
+└─────────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────────┐
+│  Edit Function: get_order_status                     [Save]     │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                  │
+│  Name:         [get_order_status____]                           │
+│  Display Name: [Get Order Status____]                           │
+│  Category:     [Orders          ▼]                              │
+│  Description:  [Get the current status of a customer order]     │
+│                                                                  │
+│  ┌─────────────────────────────────────────────────────────────┐│
+│  │  JavaScript Code (ES5)                                       ││
+│  │  ┌─────────────────────────────────────────────────────────┐││
+│  │  │ function main(input) {                                   │││
+│  │  │   var orderId = input.order_id;                         │││
+│  │  │   var result = http.get('https://api.example.com/...');  │││
+│  │  │   return {                                               │││
+│  │  │     status: result.status,                               │││
+│  │  │     tracking: result.tracking_number                     │││
+│  │  │   };                                                     │││
+│  │  │ }                                                        │││
+│  │  └─────────────────────────────────────────────────────────┘││
+│  └─────────────────────────────────────────────────────────────┘│
+│                                                                  │
+│  ┌───────────────────────────┐ ┌───────────────────────────────┐│
+│  │  Input Schema             │ │  Output Schema                ││
+│  │  ┌───────────────────────┐│ │  ┌───────────────────────────┐││
+│  │  │ {                     ││ │  │ {                         │││
+│  │  │   "order_id": "string"││ │  │   "status": "string",     │││
+│  │  │ }                     ││ │  │   "tracking": "string"    │││
+│  │  └───────────────────────┘│ │  └───────────────────────────┘││
+│  └───────────────────────────┘ └───────────────────────────────┘│
+│                                                                  │
+│  Dependencies: [axios] [lodash] [+ Add Library]                 │
+│  Timeout: [5000___] ms                                          │
+│                                                                  │
+│  ┌─────────────────────────────────────────────────────────────┐│
+│  │  Trigger Rules - When can AI call this function?            ││
+│  │                                                              ││
+│  │  [+ Add Rule]                                                ││
+│  │                                                              ││
+│  │  Rule 1: Intent Match                                        ││
+│  │  Type: [Intent      ▼]                                      ││
+│  │  Intents: [order_status] [track_order] [+]                  ││
+│  │  Min Confidence: [0.7___]                                   ││
+│  │  Response Mode: [AI Process ▼] (AI interprets result)       ││
+│  │                                                [Delete Rule] ││
+│  │                                                              ││
+│  │  Rule 2: Keyword Match                                       ││
+│  │  Type: [Keyword     ▼]                                      ││
+│  │  Keywords: [order number] [ORD-] [tracking] [+]             ││
+│  │  Response Mode: [Direct     ▼] (show result to user)        ││
+│  │                                                [Delete Rule] ││
+│  └─────────────────────────────────────────────────────────────┘│
+│                                                                  │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+### 12.5 JS Libraries Management Page
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│  JS Libraries                                    [+ Add Library] │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                  │
+│  ┌─────────────────────────────────────────────────────────────┐│
+│  │  ○ axios (v1.6.0)                npm        [Edit] [Delete] ││
+│  │    HTTP client for API calls                                 ││
+│  │    Exports: axios                                            ││
+│  ├─────────────────────────────────────────────────────────────┤│
+│  │  ○ lodash (v4.17.21)             npm        [Edit] [Delete] ││
+│  │    Utility library                                           ││
+│  │    Exports: _                                                ││
+│  ├─────────────────────────────────────────────────────────────┤│
+│  │  ○ my-utils                       custom    [Edit] [Delete] ││
+│  │    Custom utility functions                                  ││
+│  │    Exports: MyUtils                                          ││
+│  └─────────────────────────────────────────────────────────────┘│
+│                                                                  │
+└─────────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────────┐
+│  Add Library                                         [Save]     │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                  │
+│  Source Type: ( ) NPM Package  ( ) URL  (●) Custom Code         │
+│                                                                  │
+│  Name:        [my-utils_________]                               │
+│  Description: [Custom utility functions]                        │
+│                                                                  │
+│  ┌─────────────────────────────────────────────────────────────┐│
+│  │  Code (ES5 bundled)                                          ││
+│  │  ┌─────────────────────────────────────────────────────────┐││
+│  │  │ var MyUtils = {                                          │││
+│  │  │   formatDate: function(d) {                              │││
+│  │  │     return d.toISOString().split('T')[0];               │││
+│  │  │   },                                                     │││
+│  │  │   formatCurrency: function(amount, currency) {           │││
+│  │  │     return currency + ' ' + amount.toFixed(2);           │││
+│  │  │   }                                                      │││
+│  │  │ };                                                       │││
+│  │  └─────────────────────────────────────────────────────────┘││
+│  └─────────────────────────────────────────────────────────────┘│
+│                                                                  │
+│  Exported Globals: [MyUtils] [+]                                │
+│                                                                  │
+│  Note: For NPM packages, bundle with esbuild first:             │
+│  $ npx esbuild pkg --bundle --format=iife --target=es5          │
+│                                                                  │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+### 12.6 Workflow Designer Page
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│  Workflows                                       [+ New Workflow]│
+├─────────────────────────────────────────────────────────────────┤
+│                                                                  │
+│  ┌─────────────────────────────────────────────────────────────┐│
+│  │  ○ order_inquiry_flow           Enabled     [Edit] [Test]   ││
+│  │    Handle order status inquiries                             ││
+│  │    Trigger: Intent match (order_status, track_order)         ││
+│  ├─────────────────────────────────────────────────────────────┤│
+│  │  ○ refund_request_flow          Enabled     [Edit] [Test]   ││
+│  │    Process refund requests                                   ││
+│  │    Trigger: Keyword match (refund, return, money back)       ││
+│  └─────────────────────────────────────────────────────────────┘│
+│                                                                  │
+└─────────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────────┐
+│  Workflow Editor: order_inquiry_flow             [Save] [Test]  │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                  │
+│  Name: [order_inquiry_flow]  Enabled: [✓]                       │
+│                                                                  │
+│  Trigger Type: [Intent ▼]                                       │
+│  Intents: [order_status] [track_order] [where_is_my_order] [+]  │
+│                                                                  │
+│  ┌─────────────────────────────────────────────────────────────┐│
+│  │                     VISUAL WORKFLOW CANVAS                   ││
+│  │                                                              ││
+│  │     ┌─────────┐                                             ││
+│  │     │ Trigger │                                             ││
+│  │     │(Intent) │                                             ││
+│  │     └────┬────┘                                             ││
+│  │          │                                                   ││
+│  │          ▼                                                   ││
+│  │     ┌─────────┐                                             ││
+│  │     │ Prompt  │  "What is your order number?"               ││
+│  │     │(Ask ID) │                                             ││
+│  │     └────┬────┘                                             ││
+│  │          │                                                   ││
+│  │          ▼                                                   ││
+│  │     ┌─────────┐                                             ││
+│  │     │ JS Func │  get_order_status                           ││
+│  │     │(Lookup) │                                             ││
+│  │     └────┬────┘                                             ││
+│  │          │                                                   ││
+│  │          ▼                                                   ││
+│  │     ┌─────────┐                                             ││
+│  │     │Condition│  Check status value                         ││
+│  │     └────┬────┘                                             ││
+│  │    ┌─────┼─────┐                                            ││
+│  │    ▼     ▼     ▼                                            ││
+│  │ [shipped] [pending] [other]                                  ││
+│  │    │     │     │                                            ││
+│  │    ▼     ▼     ▼                                            ││
+│  │ [Message] [Message] [AI Response]                            ││
+│  │                                                              ││
+│  │  NODE PALETTE:                                               ││
+│  │  [Prompt] [Message] [Condition] [JS Func] [AI] [Handover]   ││
+│  │                                                              ││
+│  └─────────────────────────────────────────────────────────────┘│
+│                                                                  │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+### 12.7 AI Analytics Dashboard
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│  AI Analytics                               [Last 7 Days ▼]     │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                  │
+│  ┌───────────────┐ ┌───────────────┐ ┌───────────────┐          │
+│  │ Conversations │ │ AI Resolution │ │   Total Cost  │          │
+│  │     1,234     │ │     78%       │ │    $45.67     │          │
+│  │   ↑ 12%       │ │   ↑ 5%        │ │   ↓ 8%        │          │
+│  └───────────────┘ └───────────────┘ └───────────────┘          │
+│                                                                  │
+│  ┌───────────────┐ ┌───────────────┐ ┌───────────────┐          │
+│  │   Handovers   │ │  Avg Response │ │  KB Hit Rate  │          │
+│  │      267      │ │    2.3 sec    │ │     65%       │          │
+│  │   ↓ 15%       │ │   ↓ 0.5s      │ │   ↑ 10%       │          │
+│  └───────────────┘ └───────────────┘ └───────────────┘          │
+│                                                                  │
+│  ┌─────────────────────────────────────────────────────────────┐│
+│  │  Handover Reasons                                            ││
+│  │  ████████████████████ Budget Exceeded (35%)                 ││
+│  │  ██████████████ User Request (25%)                          ││
+│  │  ██████████ Frustration (18%)                               ││
+│  │  ████████ AI Failure (15%)                                  ││
+│  │  ████ Timeout (7%)                                          ││
+│  └─────────────────────────────────────────────────────────────┘│
+│                                                                  │
+│  ┌─────────────────────────────────────────────────────────────┐│
+│  │  Top JS Functions by Usage                                   ││
+│  │  1. get_order_status     1,234 calls    98% success         ││
+│  │  2. check_inventory        567 calls    99% success         ││
+│  │  3. create_ticket           89 calls   100% success         ││
+│  └─────────────────────────────────────────────────────────────┘│
+│                                                                  │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+---
+
+## 13. Summary
 
 The proposed AI bot system is ambitious but achievable. Key architectural decisions:
 
 1. **Use OpenAI Function Calling** for tool/JS Func integration
 2. **Use Qdrant** with chunked KB articles for RAG
-3. **Use Deno** for secure JS execution
+3. **Use Goja** for embedded JS execution (pure Go, no external deps)
 4. **Store workflows as JSON** in MySQL for horizontal scaling
 5. **Use NATS** for cross-instance cache invalidation
 6. **Implement 7-layer handover detection** (budget, timeout, explicit, frustration, AI failure, workflow dead end, JS Func failure)
-7. **Use multilingual embeddings** for cross-language KB search
+7. **Use lingua-go** for language detection on first message
 8. **Inline translation via GPT** for multi-language responses
+9. **Editable System Prompt** from admin dashboard
 
 ### Confirmed Requirements
 
@@ -2353,17 +3086,23 @@ The proposed AI bot system is ambitious but achievable. Key architectural decisi
 | Single tenant | No tenant isolation needed |
 | No GDPR | Standard data handling |
 | Cost budget | `AIBudgetConfig` + `AIConversationUsage` |
-| Multi-language | Language detection + GPT translation |
+| Multi-language | Language detection (first msg) + GPT translation |
 | Timeout handover | `AITimeoutConfig` with configurable limits |
+| Global enable/disable | `AIConfiguration.GlobalEnabled` master switch |
+| Editable system prompt | `AIConfiguration.SystemPromptTemplate` |
+| Goja only | No Deno/Docker, pure Go JS runtime |
+| Custom JS libraries | `JSLibrary` model for bundled npm/custom code |
+| Function trigger rules | `JSFuncTriggerRule` - when functions can be called |
 
 ### Technology Stack
 
 | Component | Choice |
 |-----------|--------|
-| LLM Provider | OpenAI (GPT-4) |
-| Vector Database | Qdrant |
+| LLM Provider | OpenAI (GPT-4) via `sashabaranov/go-openai` |
+| Vector Database | Qdrant via `qdrant/go-client` |
 | Embeddings | text-embedding-3-small (multilingual) |
-| JS Runtime | Deno (sandboxed) |
+| JS Runtime | Goja (`dop251/goja` + `goja_nodejs`) |
+| Language Detection | `pemistahl/lingua-go` |
 | Messaging | NATS (existing) |
 | Database | MySQL (existing) |
 | Workflow Storage | JSON in MySQL |
