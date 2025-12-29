@@ -3,6 +3,7 @@ package ai
 import (
 	"encoding/json"
 	"fmt"
+	"regexp"
 	"strings"
 )
 
@@ -317,21 +318,27 @@ func GenerateArticleSummary(req GenerateArticleSummaryRequest) (*GenerateArticle
 		return nil, fmt.Errorf("OpenAI client not initialized")
 	}
 
+	// Strip HTML tags from content for cleaner AI processing
+	cleanContent := stripHTMLTags(req.Content)
+
 	messages := []ChatMessage{
 		{
 			Role: "system",
-			Content: `You are a professional content writer. Generate a concise and engaging summary for the given article.
+			Content: `You are a professional content writer for a knowledge base. Generate a concise and engaging summary for the given article.
+
+IMPORTANT: You MUST read and analyze the FULL article content provided below, not just the title.
+
 The summary should:
 - Be 1-2 sentences (maximum 200 characters)
-- Capture the main topic and key value proposition
-- Be written in a clear, informative style
-- Encourage readers to read the full article
+- Accurately describe what the article content is about
+- Capture the main topic, key points, and value proposition from the content
+- Be written in a clear, informative style that reflects the article body
 
 Only output the summary text without any explanations, quotes, or additional comments.`,
 		},
 		{
 			Role:    "user",
-			Content: fmt.Sprintf("Generate a summary for this article:\n\nTitle: %s\n\nContent:\n%s", req.Title, req.Content),
+			Content: fmt.Sprintf("Generate a summary for this knowledge base article.\n\nArticle Title: %s\n\nArticle Content:\n%s", req.Title, cleanContent),
 		},
 	}
 
@@ -443,4 +450,25 @@ Only output valid JSON, nothing else.`, languageInstruction, toneInstruction, ta
 		WasTranslated:         aiResponse.WasTranslated,
 		Improvements:          aiResponse.Improvements,
 	}, nil
+}
+
+// stripHTMLTags removes HTML tags from a string and returns clean text
+func stripHTMLTags(html string) string {
+	// Remove HTML tags using regex
+	re := regexp.MustCompile(`<[^>]*>`)
+	text := re.ReplaceAllString(html, " ")
+
+	// Decode common HTML entities
+	text = strings.ReplaceAll(text, "&nbsp;", " ")
+	text = strings.ReplaceAll(text, "&amp;", "&")
+	text = strings.ReplaceAll(text, "&lt;", "<")
+	text = strings.ReplaceAll(text, "&gt;", ">")
+	text = strings.ReplaceAll(text, "&quot;", "\"")
+	text = strings.ReplaceAll(text, "&#39;", "'")
+
+	// Clean up multiple spaces and newlines
+	spaceRe := regexp.MustCompile(`\s+`)
+	text = spaceRe.ReplaceAllString(text, " ")
+
+	return strings.TrimSpace(text)
 }
