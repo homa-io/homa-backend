@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -311,4 +312,50 @@ func GetBucket() string {
 // GetClient returns the S3 client for advanced operations
 func GetClient() *s3.Client {
 	return s3Client
+}
+
+// DownloadRange downloads a byte range from S3 (for video seeking support)
+func DownloadRange(ctx context.Context, key string, rangeHeader string) (io.ReadCloser, string, int64, int64, error) {
+	if !IsEnabled() {
+		return nil, "", 0, 0, fmt.Errorf("S3 storage not enabled")
+	}
+
+	input := &s3.GetObjectInput{
+		Bucket: aws.String(bucket),
+		Key:    aws.String(key),
+	}
+
+	if rangeHeader != "" {
+		input.Range = aws.String(rangeHeader)
+	}
+
+	result, err := s3Client.GetObject(ctx, input)
+	if err != nil {
+		return nil, "", 0, 0, err
+	}
+
+	contentType := ""
+	if result.ContentType != nil {
+		contentType = *result.ContentType
+	}
+
+	contentLength := int64(0)
+	if result.ContentLength != nil {
+		contentLength = *result.ContentLength
+	}
+
+	// Get total file size from ContentRange header
+	// Format: "bytes 0-999/5000" where 5000 is total size
+	totalSize := contentLength
+	if result.ContentRange != nil {
+		// Parse content range to get total size
+		parts := strings.Split(*result.ContentRange, "/")
+		if len(parts) == 2 {
+			if size, err := strconv.ParseInt(parts[1], 10, 64); err == nil {
+				totalSize = size
+			}
+		}
+	}
+
+	return result.Body, contentType, contentLength, totalSize, nil
 }

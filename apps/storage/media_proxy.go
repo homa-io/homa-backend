@@ -8,6 +8,7 @@ import (
 	"image"
 	"image/jpeg"
 	"image/png"
+	"io"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -126,6 +127,15 @@ func MediaProxyHandler(c *fiber.Ctx) error {
 		qualityInt = 85
 	}
 
+	// Check if this is a video request with Range header
+	rangeHeader := c.Get("Range")
+	isVideo := isVideoPath(path)
+
+	// For video with Range request, handle streaming
+	if isVideo && rangeHeader != "" {
+		return handleVideoRangeRequest(c, path, rangeHeader)
+	}
+
 	// Generate cache key
 	cacheKey := generateCacheKey(path, format, sizeStr, qualityInt)
 
@@ -133,6 +143,10 @@ func MediaProxyHandler(c *fiber.Ctx) error {
 	if cacheEnabled {
 		cacheFile := filepath.Join(cachePath, cacheKey)
 		if data, contentType, err := readFromCache(cacheFile); err == nil {
+			// For videos, set Accept-Ranges header
+			if isVideo {
+				c.Set("Accept-Ranges", "bytes")
+			}
 			c.Set("X-Cache", "HIT")
 			c.Set("Cache-Control", "public, max-age=31536000")
 			c.Set("Content-Type", contentType)
@@ -203,10 +217,164 @@ func MediaProxyHandler(c *fiber.Ctx) error {
 		go saveToCache(cacheFile, data, contentType)
 	}
 
+	// For videos, set Accept-Ranges header
+	if isVideo {
+		c.Set("Accept-Ranges", "bytes")
+	}
+
 	c.Set("X-Cache", "MISS")
 	c.Set("Cache-Control", "public, max-age=31536000")
 	c.Set("Content-Type", contentType)
 	return c.Send(data)
+}
+
+// isVideoPath checks if the path is a video file
+func isVideoPath(path string) bool {
+	ext := strings.ToLower(filepath.Ext(path))
+	return ext == ".mp4" || ext == ".webm" || ext == ".mov" || ext == ".avi" || ext == ".mkv"
+}
+
+// handleVideoRangeRequest handles HTTP Range requests for video seeking
+func handleVideoRangeRequest(c *fiber.Ctx, path string, rangeHeader string) error {
+	ctx := context.Background()
+
+	// First, get the file info to know total size
+	info, err := GetObjectInfo(ctx, path)
+	if err != nil {
+		log.Error("Failed to get object info: %v", err)
+		return c.Status(404).JSON(fiber.Map{
+			"error": "File not found",
+		})
+	}
+
+	totalSize := info.Size
+	contentType := info.ContentType
+	if contentType == "" {
+		contentType = getContentTypeFromExt(filepath.Ext(path))
+	}
+
+	// Parse Range header: "bytes=0-" or "bytes=0-1023"
+	rangeStart, rangeEnd := parseRangeHeader(rangeHeader, totalSize)
+
+	// Create the S3 range header format
+	s3Range := fmt.Sprintf("bytes=%d-%d", rangeStart, rangeEnd)
+
+	// Download the range from S3
+	body, _, _, _, err := DownloadRange(ctx, path, s3Range)
+	if err != nil {
+		log.Error("Failed to download range from S3: %v", err)
+		return c.Status(500).JSON(fiber.Map{
+			"error": "Failed to fetch video range",
+		})
+	}
+	defer body.Close()
+
+	// Read the entire chunk into memory first to avoid streaming issues
+	// This prevents nginx timeout when streaming from S3 through Fiber
+	data, err := io.ReadAll(body)
+	if err != nil {
+		log.Error("Failed to read video data: %v", err)
+		return c.Status(500).JSON(fiber.Map{
+			"error": "Failed to read video data",
+		})
+	}
+
+	// Set response headers for partial content
+	c.Set("Accept-Ranges", "bytes")
+	c.Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", rangeStart, rangeEnd, totalSize))
+	c.Set("Content-Length", strconv.FormatInt(int64(len(data)), 10))
+	c.Set("Content-Type", contentType)
+	c.Set("Cache-Control", "public, max-age=31536000")
+
+	// Return 206 Partial Content with the data
+	return c.Status(206).Send(data)
+}
+
+// parseRangeHeader parses HTTP Range header and returns start and end bytes
+// Only limits OPEN-ENDED ranges (bytes=X-) to prevent timeout
+// Explicit ranges (bytes=X-Y) are honored exactly for proper video seeking
+func parseRangeHeader(rangeHeader string, totalSize int64) (int64, int64) {
+	// Maximum chunk size for open-ended ranges only
+	const maxChunkSize int64 = 5 * 1024 * 1024
+
+	// Format: "bytes=0-" or "bytes=0-1023" or "bytes=-500" (last 500 bytes)
+	rangeHeader = strings.TrimPrefix(rangeHeader, "bytes=")
+
+	parts := strings.Split(rangeHeader, "-")
+	if len(parts) != 2 {
+		// Invalid format, return first chunk
+		end := maxChunkSize - 1
+		if end >= totalSize {
+			end = totalSize - 1
+		}
+		return 0, end
+	}
+
+	var start, end int64
+
+	// Handle suffix range: "-500" means last 500 bytes
+	if parts[0] == "" {
+		if suffix, err := strconv.ParseInt(parts[1], 10, 64); err == nil {
+			start = totalSize - suffix
+			if start < 0 {
+				start = 0
+			}
+			// Suffix ranges are typically small, return full requested range
+			return start, totalSize - 1
+		}
+		// Parse error, return first chunk
+		end = maxChunkSize - 1
+		if end >= totalSize {
+			end = totalSize - 1
+		}
+		return 0, end
+	}
+
+	// Parse start
+	var err error
+	start, err = strconv.ParseInt(parts[0], 10, 64)
+	if err != nil {
+		start = 0
+	}
+	if start < 0 {
+		start = 0
+	}
+	if start >= totalSize {
+		start = totalSize - 1
+	}
+
+	// Parse end
+	if parts[1] == "" {
+		// OPEN-ENDED range: "0-" or "1000-" means from start to end
+		// THIS is where we limit to prevent timeout on large files
+		end = start + maxChunkSize - 1
+		if end >= totalSize {
+			end = totalSize - 1
+		}
+	} else {
+		// EXPLICIT range: "0-1023" means bytes 0 to 1023
+		// Honor exactly what was requested - DON'T limit
+		// This is critical for video seeking to work correctly
+		end, err = strconv.ParseInt(parts[1], 10, 64)
+		if err != nil {
+			end = start + maxChunkSize - 1
+		}
+		// Cap at file size but don't reduce below requested
+		if end >= totalSize {
+			end = totalSize - 1
+		}
+	}
+
+	// Final validation
+	if start > end {
+		start = 0
+		end = maxChunkSize - 1
+		if end >= totalSize {
+			end = totalSize - 1
+		}
+	}
+
+	return start, end
 }
 
 // generateCacheKey generates a unique cache key for the request

@@ -233,7 +233,7 @@ func (c Controller) UpdateKBArticle(request *evo.Request) any {
 		Title         string   `json:"title"`
 		Content       string   `json:"content"`
 		Summary       string   `json:"summary"`
-		FeaturedImage string   `json:"featured_image"`
+		FeaturedImage *string  `json:"featured_image"`
 		CategoryID    *string  `json:"category_id"`
 		Status        string   `json:"status"`
 		Featured      *bool    `json:"featured"`
@@ -276,7 +276,10 @@ func (c Controller) UpdateKBArticle(request *evo.Request) any {
 		article.Summary = req.Summary
 	}
 
-	article.FeaturedImage = req.FeaturedImage
+	// Only update FeaturedImage if explicitly provided in request
+	if req.FeaturedImage != nil {
+		article.FeaturedImage = *req.FeaturedImage
+	}
 
 	if req.CategoryID != nil {
 		if *req.CategoryID == "" {
