@@ -132,7 +132,7 @@ func (c Controller) CreateUser(request *evo.Request) interface{} {
 	}
 
 	// Validate user type
-	if req.Type != UserTypeAgent && req.Type != UserTypeAdministrator {
+	if req.Type != UserTypeAgent && req.Type != UserTypeAdministrator && req.Type != UserTypeBot {
 		return response.Error(response.NewError(response.ErrorCodeInvalidInput, "Invalid user type", 400))
 	}
 
@@ -268,7 +268,7 @@ func (c Controller) UpdateUser(request *evo.Request) interface{} {
 		targetUser.Email = *req.Email
 	}
 	if req.Type != nil {
-		if *req.Type != UserTypeAgent && *req.Type != UserTypeAdministrator {
+		if *req.Type != UserTypeAgent && *req.Type != UserTypeAdministrator && *req.Type != UserTypeBot {
 			return response.Error(response.NewError(response.ErrorCodeInvalidInput, "Invalid user type", 400))
 		}
 		targetUser.Type = *req.Type

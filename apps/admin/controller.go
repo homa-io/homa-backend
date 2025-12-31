@@ -622,8 +622,9 @@ func (c Controller) DeleteMessage(request *evo.Request) any {
 // CreateDepartment creates a new department
 func (c Controller) CreateDepartment(request *evo.Request) any {
 	var req struct {
-		Name        string `json:"name" validate:"required,min=1,max=255"`
-		Description string `json:"description"`
+		Name        string   `json:"name" validate:"required,min=1,max=255"`
+		Description string   `json:"description"`
+		UserIDs     []string `json:"user_ids"` // UUIDs of users to assign
 	}
 
 	if err := request.BodyParser(&req); err != nil {
@@ -633,16 +634,47 @@ func (c Controller) CreateDepartment(request *evo.Request) any {
 	department := models.Department{
 		Name:        req.Name,
 		Description: req.Description,
+		Status:      models.DepartmentStatusActive,
 	}
 
-	err := db.Create(&department).Error
+	// Use transaction for creating department and assigning users
+	tx := db.Begin()
+
+	err := tx.Create(&department).Error
 	if err != nil {
+		tx.Rollback()
 		if strings.Contains(err.Error(), "duplicate") || strings.Contains(err.Error(), "unique") {
 			duplicateErr := response.NewError(response.ErrorCodeConflict, "Department name already exists", 409)
 			return response.Error(duplicateErr)
 		}
 		return response.Error(response.ErrInternalError)
 	}
+
+	// Assign users if provided
+	if len(req.UserIDs) > 0 {
+		for _, userIDStr := range req.UserIDs {
+			userID, err := uuid.Parse(userIDStr)
+			if err != nil {
+				continue // Skip invalid UUIDs
+			}
+			userDept := models.UserDepartment{
+				UserID:       userID,
+				DepartmentID: department.ID,
+			}
+			if err := tx.Create(&userDept).Error; err != nil {
+				// Ignore duplicate entries
+				if !strings.Contains(err.Error(), "duplicate") && !strings.Contains(err.Error(), "unique") {
+					tx.Rollback()
+					return response.Error(response.ErrInternalError)
+				}
+			}
+		}
+	}
+
+	tx.Commit()
+
+	// Reload with users
+	db.Preload("Users").First(&department, department.ID)
 
 	return response.Created(department)
 }
@@ -655,8 +687,10 @@ func (c Controller) EditDepartment(request *evo.Request) any {
 	}
 
 	var req struct {
-		Name        string `json:"name" validate:"required,min=1,max=255"`
-		Description string `json:"description"`
+		Name        string   `json:"name" validate:"required,min=1,max=255"`
+		Description string   `json:"description"`
+		Status      string   `json:"status"` // active, suspended
+		UserIDs     []string `json:"user_ids"` // UUIDs of users to assign (replaces existing)
 	}
 
 	if err := request.BodyParser(&req); err != nil {
@@ -667,22 +701,68 @@ func (c Controller) EditDepartment(request *evo.Request) any {
 	err := db.First(&department, departmentID).Error
 	if err != nil {
 		if err == gorm.ErrRecordNotFound {
-			return response.Error(response.ErrConversationNotFound)
+			notFoundErr := response.NewError(response.ErrorCodeNotFound, "Department not found", 404)
+			return response.Error(notFoundErr)
 		}
 		return response.Error(response.ErrInternalError)
 	}
 
-	err = db.Model(&department).Updates(models.Department{
-		Name:        req.Name,
-		Description: req.Description,
-	}).Error
+	tx := db.Begin()
+
+	// Update department fields
+	updates := map[string]interface{}{
+		"name":        req.Name,
+		"description": req.Description,
+	}
+	if req.Status != "" && (req.Status == models.DepartmentStatusActive || req.Status == models.DepartmentStatusSuspended) {
+		updates["status"] = req.Status
+	}
+
+	err = tx.Model(&department).Updates(updates).Error
 	if err != nil {
+		tx.Rollback()
 		if strings.Contains(err.Error(), "duplicate") || strings.Contains(err.Error(), "unique") {
 			duplicateErr := response.NewError(response.ErrorCodeConflict, "Department name already exists", 409)
 			return response.Error(duplicateErr)
 		}
 		return response.Error(response.ErrInternalError)
 	}
+
+	// Update user assignments if user_ids provided (replace all)
+	if req.UserIDs != nil {
+		// Remove all existing assignments
+		if err := tx.Where("department_id = ?", departmentID).Delete(&models.UserDepartment{}).Error; err != nil {
+			tx.Rollback()
+			return response.Error(response.ErrInternalError)
+		}
+
+		// Add new assignments with priority based on array order
+		for priority, userIDStr := range req.UserIDs {
+			userID, err := uuid.Parse(userIDStr)
+			if err != nil {
+				continue // Skip invalid UUIDs
+			}
+			userDept := models.UserDepartment{
+				UserID:       userID,
+				DepartmentID: uint(departmentID),
+				Priority:     priority,
+			}
+			if err := tx.Create(&userDept).Error; err != nil {
+				// Ignore duplicate entries
+				if !strings.Contains(err.Error(), "duplicate") && !strings.Contains(err.Error(), "unique") {
+					tx.Rollback()
+					return response.Error(response.ErrInternalError)
+				}
+			}
+		}
+	}
+
+	if err := tx.Commit().Error; err != nil {
+		return response.Error(response.ErrInternalError)
+	}
+
+	// Reload with users
+	db.Preload("Users").First(&department, departmentID)
 
 	return response.OK(department)
 }
@@ -717,13 +797,19 @@ func (c Controller) SoftDeleteDepartment(request *evo.Request) any {
 // ListDepartments returns paginated list of departments with search
 func (c Controller) ListDepartments(request *evo.Request) any {
 	var departments []models.Department
-	query := db.Model(&models.Department{})
+	query := db.Model(&models.Department{}).Preload("Users")
 
 	// Search functionality
 	search := request.Query("search").String()
 	if search != "" {
 		query = query.Where("id = ? OR name LIKE ? OR description LIKE ?",
 			parseIntOrZero(search), "%"+search+"%", "%"+search+"%")
+	}
+
+	// Filter by status
+	status := request.Query("status").String()
+	if status != "" {
+		query = query.Where("status = ?", status)
 	}
 
 	// Order by
@@ -748,6 +834,65 @@ func (c Controller) ListDepartments(request *evo.Request) any {
 		Total:      int64(p.Records),
 		TotalPages: p.Pages,
 	})
+}
+
+// GetDepartment returns a single department by ID
+func (c Controller) GetDepartment(request *evo.Request) any {
+	departmentID := parseIntOrZero(request.Param("id").String())
+	if departmentID == 0 {
+		return response.Error(response.ErrInvalidInput)
+	}
+
+	var department models.Department
+	err := db.Preload("Users").First(&department, departmentID).Error
+	if err != nil {
+		if err == gorm.ErrRecordNotFound {
+			notFoundErr := response.NewError(response.ErrorCodeNotFound, "Department not found", 404)
+			return response.Error(notFoundErr)
+		}
+		return response.Error(response.ErrInternalError)
+	}
+
+	return response.OK(department)
+}
+
+// SuspendDepartment suspends or activates a department
+func (c Controller) SuspendDepartment(request *evo.Request) any {
+	departmentID := parseIntOrZero(request.Param("id").String())
+	if departmentID == 0 {
+		return response.Error(response.ErrInvalidInput)
+	}
+
+	var req struct {
+		Suspended bool `json:"suspended"`
+	}
+
+	if err := request.BodyParser(&req); err != nil {
+		return response.Error(response.ErrInvalidInput)
+	}
+
+	var department models.Department
+	err := db.First(&department, departmentID).Error
+	if err != nil {
+		if err == gorm.ErrRecordNotFound {
+			notFoundErr := response.NewError(response.ErrorCodeNotFound, "Department not found", 404)
+			return response.Error(notFoundErr)
+		}
+		return response.Error(response.ErrInternalError)
+	}
+
+	newStatus := models.DepartmentStatusActive
+	if req.Suspended {
+		newStatus = models.DepartmentStatusSuspended
+	}
+
+	err = db.Model(&department).Update("status", newStatus).Error
+	if err != nil {
+		return response.Error(response.ErrInternalError)
+	}
+
+	department.Status = newStatus
+	return response.OK(department)
 }
 
 // =====================

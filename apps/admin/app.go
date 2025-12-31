@@ -31,9 +31,11 @@ func (a App) Router() error {
 
 	// Department management APIs
 	evo.Post("/api/admin/departments", controller.CreateDepartment)
-	evo.Put("/api/admin/departments/:id", controller.EditDepartment)
-	evo.Delete("/api/admin/departments/:id", controller.SoftDeleteDepartment)
 	evo.Get("/api/admin/departments", controller.ListDepartments)
+	evo.Get("/api/admin/departments/:id", controller.GetDepartment)
+	evo.Put("/api/admin/departments/:id", controller.EditDepartment)
+	evo.Put("/api/admin/departments/:id/suspend", controller.SuspendDepartment)
+	evo.Delete("/api/admin/departments/:id", controller.SoftDeleteDepartment)
 
 	// Tag management APIs
 	evo.Post("/api/admin/tags", controller.AddTag)

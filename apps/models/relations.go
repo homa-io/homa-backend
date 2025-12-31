@@ -42,6 +42,7 @@ func (ConversationTag) TableName() string {
 type UserDepartment struct {
 	UserID       uuid.UUID `gorm:"column:user_id;type:char(36);primaryKey;fk:users" json:"user_id"`
 	DepartmentID uint      `gorm:"column:department_id;primaryKey;fk:departments" json:"department_id"`
+	Priority     int       `gorm:"column:priority;default:0" json:"priority"`
 
 	// Relationships
 	User       auth.User  `gorm:"foreignKey:UserID;references:UserID" json:"user,omitempty"`

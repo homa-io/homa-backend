@@ -51,3 +51,5 @@ config.dev.yml
 scripts/*.log
 _webhook_test/logs/
 _webhook_test/server.log
+# Cache directory
+cache/

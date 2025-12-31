@@ -53,6 +53,6 @@ fi
 echo "Building homa-backend..."
 go build -o homa-backend main.go
 
-# Run the application
+# Run the application with auto-migration
 echo "Starting homa-backend on port $PORT..."
-exec ./homa-backend -c "$CONFIG_FILE"
+exec ./homa-backend -c "$CONFIG_FILE" --migration-do
