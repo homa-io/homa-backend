@@ -44,7 +44,7 @@ type Conversation struct {
 	DepartmentID *uint          `gorm:"column:department_id;index;fk:departments" json:"department_id"`
 	ChannelID    string         `gorm:"column:channel_id;size:50;not null;index;fk:channels" json:"channel_id"`
 	ExternalID   *string        `gorm:"column:external_id;size:255;index" json:"external_id"`
-	Secret       string         `gorm:"column:secret;size:32;not null" json:"secret"` // Exposed in JSON - conversation_id + secret acts as credentials
+	Secret       string         `gorm:"column:secret;size:32;not null" json:"-"` // Hidden from JSON - only returned on creation via CreateConversationResponse
 	Status          string         `gorm:"column:status;size:50;not null;check:status IN ('new','wait_for_agent','in_progress','wait_for_user','on_hold','resolved','closed','unresolved','spam')" json:"status"`
 	Priority        string         `gorm:"column:priority;size:50;not null;check:priority IN ('low','medium','high','urgent')" json:"priority"`
 	CustomFields    datatypes.JSON `gorm:"column:custom_fields;type:json" json:"custom_fields"`

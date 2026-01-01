@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -419,24 +420,154 @@ func castToDate(value interface{}) (time.Time, error) {
 	}
 }
 
-// validateValueWithRules validates a value against validation rules (simplified version)
-// This is a basic implementation - in production you might want to use a full validation library
+// validateValueWithRules validates a value against validation rules
+// Supports rules: min, max, pattern, required (comma-separated)
+// Example: "min:1,max:100,pattern:^[a-zA-Z]+$"
 func validateValueWithRules(value interface{}, rules string) error {
-	// This is a simplified validation implementation
-	// For full validation, you could integrate with github.com/go-playground/validator/v10
-	// or implement custom validation parsing
-
-	// Example basic validations:
 	if rules == "" {
 		return nil
 	}
 
-	// For now, just log that validation rules are being applied
-	log.Debug("Applying validation rules", "rules", rules, "value", value)
+	// Parse rules (comma-separated)
+	ruleList := strings.Split(rules, ",")
 
-	// TODO: Implement full validation rule parsing and execution
-	// This would parse rules like "min:1,max:5" and apply them to the value
+	for _, rule := range ruleList {
+		rule = strings.TrimSpace(rule)
+		if rule == "" {
+			continue
+		}
 
+		// Handle "required" rule
+		if rule == "required" {
+			if value == nil {
+				return fmt.Errorf("value is required")
+			}
+			if str, ok := value.(string); ok && str == "" {
+				return fmt.Errorf("value is required")
+			}
+			continue
+		}
+
+		// Parse "key:value" format
+		parts := strings.SplitN(rule, ":", 2)
+		if len(parts) != 2 {
+			log.Warning("Invalid validation rule format: %s", rule)
+			continue
+		}
+
+		ruleName := strings.TrimSpace(parts[0])
+		ruleValue := strings.TrimSpace(parts[1])
+
+		switch ruleName {
+		case "min":
+			minVal, err := strconv.ParseFloat(ruleValue, 64)
+			if err != nil {
+				log.Warning("Invalid min value in validation rule: %s", ruleValue)
+				continue
+			}
+			if err := validateMin(value, minVal); err != nil {
+				return err
+			}
+
+		case "max":
+			maxVal, err := strconv.ParseFloat(ruleValue, 64)
+			if err != nil {
+				log.Warning("Invalid max value in validation rule: %s", ruleValue)
+				continue
+			}
+			if err := validateMax(value, maxVal); err != nil {
+				return err
+			}
+
+		case "pattern":
+			if str, ok := value.(string); ok {
+				matched, err := regexp.MatchString(ruleValue, str)
+				if err != nil {
+					log.Warning("Invalid regex pattern in validation rule: %s", ruleValue)
+					continue
+				}
+				if !matched {
+					return fmt.Errorf("value does not match required pattern")
+				}
+			}
+
+		case "minlen":
+			minLen, err := strconv.Atoi(ruleValue)
+			if err != nil {
+				log.Warning("Invalid minlen value in validation rule: %s", ruleValue)
+				continue
+			}
+			if str, ok := value.(string); ok {
+				if len(str) < minLen {
+					return fmt.Errorf("value must be at least %d characters", minLen)
+				}
+			}
+
+		case "maxlen":
+			maxLen, err := strconv.Atoi(ruleValue)
+			if err != nil {
+				log.Warning("Invalid maxlen value in validation rule: %s", ruleValue)
+				continue
+			}
+			if str, ok := value.(string); ok {
+				if len(str) > maxLen {
+					return fmt.Errorf("value must be at most %d characters", maxLen)
+				}
+			}
+
+		default:
+			log.Debug("Unknown validation rule: %s", ruleName)
+		}
+	}
+
+	return nil
+}
+
+// validateMin validates that a numeric value meets the minimum requirement
+func validateMin(value interface{}, minVal float64) error {
+	switch v := value.(type) {
+	case int:
+		if float64(v) < minVal {
+			return fmt.Errorf("value must be at least %v", minVal)
+		}
+	case int64:
+		if float64(v) < minVal {
+			return fmt.Errorf("value must be at least %v", minVal)
+		}
+	case float64:
+		if v < minVal {
+			return fmt.Errorf("value must be at least %v", minVal)
+		}
+	case string:
+		// For strings, min refers to length
+		if float64(len(v)) < minVal {
+			return fmt.Errorf("value must be at least %v characters", minVal)
+		}
+	}
+	return nil
+}
+
+// validateMax validates that a numeric value meets the maximum requirement
+func validateMax(value interface{}, maxVal float64) error {
+	switch v := value.(type) {
+	case int:
+		if float64(v) > maxVal {
+			return fmt.Errorf("value must be at most %v", maxVal)
+		}
+	case int64:
+		if float64(v) > maxVal {
+			return fmt.Errorf("value must be at most %v", maxVal)
+		}
+	case float64:
+		if v > maxVal {
+			return fmt.Errorf("value must be at most %v", maxVal)
+		}
+	case string:
+		// For strings, max refers to length
+		if float64(len(v)) > maxVal {
+			return fmt.Errorf("value must be at most %v characters", maxVal)
+		}
+	}
 	return nil
 }
 

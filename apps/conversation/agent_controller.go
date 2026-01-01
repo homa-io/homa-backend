@@ -209,13 +209,25 @@ func (ac AgentController) SearchConversations(req *evo.Request) interface{} {
 		)
 	}
 
-	// Apply sorting
+	// Apply sorting with whitelist validation to prevent SQL injection
 	sortBy := req.Query("sort_by").String()
-	if sortBy == "" {
-		sortBy = "updated_at"
+	// Whitelist of allowed sort columns for conversations
+	allowedSortColumns := map[string]bool{
+		"id":         true,
+		"title":      true,
+		"status":     true,
+		"priority":   true,
+		"created_at": true,
+		"updated_at": true,
+		"closed_at":  true,
 	}
+	if !allowedSortColumns[sortBy] {
+		sortBy = "updated_at" // Default to safe column
+	}
+
 	sortOrder := req.Query("sort_order").String()
-	if sortOrder == "" {
+	// Validate sort order to prevent SQL injection
+	if sortOrder != "asc" && sortOrder != "desc" {
 		sortOrder = "desc"
 	}
 	query = query.Order(fmt.Sprintf("conversations.%s %s", sortBy, sortOrder))

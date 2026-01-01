@@ -11,7 +11,7 @@ type Webhook struct {
 	ID          uint      `gorm:"primaryKey" json:"id"`
 	Name        string    `gorm:"size:255;not null" json:"name"`
 	URL         string    `gorm:"size:500;not null" json:"url"`
-	Secret      string    `gorm:"size:255" json:"secret,omitempty"`
+	Secret      string    `gorm:"size:255" json:"-"` // Hidden from JSON responses for security
 	Enabled     bool      `gorm:"default:1" json:"enabled"`
 	Description string    `gorm:"type:text" json:"description,omitempty"`
 
