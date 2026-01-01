@@ -120,6 +120,7 @@ func (c Controller) CreateUser(request *evo.Request) interface{} {
 		Password    string  `json:"password"`
 		Type        string  `json:"type"`
 		Avatar      *string `json:"avatar"`
+		SecurityKey *string `json:"security_key"`
 	}
 
 	if err := request.BodyParser(&req); err != nil {
@@ -157,6 +158,11 @@ func (c Controller) CreateUser(request *evo.Request) interface{} {
 		Type:        req.Type,
 		Status:      UserStatusActive,
 		Avatar:      req.Avatar,
+	}
+
+	// Set security_key for bot users
+	if req.Type == UserTypeBot && req.SecurityKey != nil {
+		newUser.SecurityKey = req.SecurityKey
 	}
 
 	// Set password
@@ -237,6 +243,7 @@ func (c Controller) UpdateUser(request *evo.Request) interface{} {
 		Password    *string `json:"password"`
 		Type        *string `json:"type"`
 		Avatar      *string `json:"avatar"`
+		SecurityKey *string `json:"security_key"`
 	}
 
 	if err := request.BodyParser(&req); err != nil {
@@ -280,6 +287,10 @@ func (c Controller) UpdateUser(request *evo.Request) interface{} {
 		if err := targetUser.SetPassword(*req.Password); err != nil {
 			return response.Error(response.ErrInternalError)
 		}
+	}
+	// Update security_key for bot users
+	if req.SecurityKey != nil && targetUser.Type == UserTypeBot {
+		targetUser.SecurityKey = req.SecurityKey
 	}
 
 	// Save updates
