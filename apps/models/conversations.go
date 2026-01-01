@@ -45,14 +45,14 @@ type Conversation struct {
 	ChannelID    string         `gorm:"column:channel_id;size:50;not null;index;fk:channels" json:"channel_id"`
 	ExternalID   *string        `gorm:"column:external_id;size:255;index" json:"external_id"`
 	Secret       string         `gorm:"column:secret;size:32;not null" json:"-"` // Hidden from JSON - only returned on creation via CreateConversationResponse
-	Status          string         `gorm:"column:status;size:50;not null;check:status IN ('new','wait_for_agent','in_progress','wait_for_user','on_hold','resolved','closed','unresolved','spam')" json:"status"`
-	Priority        string         `gorm:"column:priority;size:50;not null;check:priority IN ('low','medium','high','urgent')" json:"priority"`
+	Status          string         `gorm:"column:status;size:50;not null;index;check:status IN ('new','wait_for_agent','in_progress','wait_for_user','on_hold','resolved','closed','unresolved','spam')" json:"status"`
+	Priority        string         `gorm:"column:priority;size:50;not null;index;check:priority IN ('low','medium','high','urgent')" json:"priority"`
 	CustomFields    datatypes.JSON `gorm:"column:custom_fields;type:json" json:"custom_fields"`
 	IP              *string        `gorm:"column:ip;size:45" json:"ip"`
 	Browser         *string        `gorm:"column:browser;size:255" json:"browser"`
 	OperatingSystem *string        `gorm:"column:operating_system;size:255" json:"operating_system"`
-	CreatedAt       time.Time      `gorm:"column:created_at;autoCreateTime" json:"created_at"`
-	UpdatedAt       time.Time      `gorm:"column:updated_at;autoUpdateTime" json:"updated_at"`
+	CreatedAt       time.Time      `gorm:"column:created_at;autoCreateTime;index" json:"created_at"`
+	UpdatedAt       time.Time      `gorm:"column:updated_at;autoUpdateTime;index" json:"updated_at"`
 	ClosedAt        *time.Time     `gorm:"column:closed_at" json:"closed_at"`
 
 	// Relationships

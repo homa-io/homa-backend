@@ -367,7 +367,7 @@ func (ac AgentController) SearchConversations(req *evo.Request) interface{} {
 			UpdatedAt:           conv.UpdatedAt.Format("2006-01-02T15:04:05Z07:00"),
 			LastMessageAt:       lastMessageAt,
 			LastMessagePreview:  lastMessagePreview,
-			UnreadMessagesCount: 0, // TODO: Implement unread messages tracking
+			UnreadMessagesCount: 0, // Will be set below if userID is available
 			IsAssignedToMe:      isAssignedToMe,
 			Customer: CustomerInfo{
 				ID:          conv.Client.ID.String(),
@@ -390,6 +390,13 @@ func (ac AgentController) SearchConversations(req *evo.Request) interface{} {
 			OperatingSystem: conv.OperatingSystem,
 		}
 
+		// Set unread count if user is authenticated
+		if userIDStr != "" {
+			if parsedUserID, err := uuid.Parse(userIDStr); err == nil {
+				conversation.UnreadMessagesCount = int(getUnreadCountForConversation(parsedUserID, conv.ID))
+			}
+		}
+
 		conversationItems = append(conversationItems, conversation)
 	}
 
@@ -409,9 +416,11 @@ func (ac AgentController) SearchConversations(req *evo.Request) interface{} {
 	}
 
 	// Include unread count if requested
-	if req.Query("include_unread_count").String() == "true" {
-		var unreadCount int64 = 0 // TODO: Implement unread count logic
-		resp.UnreadCount = &unreadCount
+	if req.Query("include_unread_count").String() == "true" && userIDStr != "" {
+		if parsedUserID, err := uuid.Parse(userIDStr); err == nil {
+			unreadCount := getTotalUnreadCount(parsedUserID)
+			resp.UnreadCount = &unreadCount
+		}
 	}
 
 	return response.OK(resp)
@@ -426,10 +435,20 @@ func (ac AgentController) SearchConversations(req *evo.Request) interface{} {
 // @Success 200 {object} map[string]int64
 // @Router /api/agent/conversations/unread-count [get]
 func (ac AgentController) GetUnreadCount(req *evo.Request) interface{} {
-	// TODO: Implement unread count logic
-	// For now, return 0
+	// Get authenticated user ID
+	userIDStr := req.Get("user_id").String()
+	if userIDStr == "" {
+		return response.Error(response.NewErrorWithDetails(response.ErrorCodeUnauthorized, "Authentication required", 401, "No user ID in request"))
+	}
+
+	userID, err := uuid.Parse(userIDStr)
+	if err != nil {
+		return response.Error(response.NewErrorWithDetails(response.ErrorCodeInvalidInput, "Invalid user ID", 400, err.Error()))
+	}
+
+	unreadCount := getTotalUnreadCount(userID)
 	return response.OK(map[string]int64{
-		"unread_count": 0,
+		"unread_count": unreadCount,
 	})
 }
 
@@ -443,13 +462,39 @@ func (ac AgentController) GetUnreadCount(req *evo.Request) interface{} {
 // @Success 200 {object} map[string]interface{}
 // @Router /api/agent/conversations/{id}/read [patch]
 func (ac AgentController) MarkConversationRead(req *evo.Request) interface{} {
-	// TODO: Implement mark as read logic
-	// For now, return success
-	conversationID := req.Param("id").String()
+	// Get authenticated user ID
+	userIDStr := req.Get("user_id").String()
+	if userIDStr == "" {
+		return response.Error(response.NewErrorWithDetails(response.ErrorCodeUnauthorized, "Authentication required", 401, "No user ID in request"))
+	}
+
+	userID, err := uuid.Parse(userIDStr)
+	if err != nil {
+		return response.Error(response.NewErrorWithDetails(response.ErrorCodeInvalidInput, "Invalid user ID", 400, err.Error()))
+	}
+
+	// Parse conversation ID
+	conversationID := req.Param("id").Uint()
+	if conversationID == 0 {
+		return response.Error(response.NewErrorWithDetails(response.ErrorCodeInvalidInput, "Invalid conversation ID", 400, "Conversation ID must be a positive integer"))
+	}
+
+	// Verify conversation exists
+	var conversation models.Conversation
+	if err := db.Where("id = ?", conversationID).First(&conversation).Error; err != nil {
+		return response.Error(response.NewErrorWithDetails(response.ErrorCodeNotFound, "Conversation not found", 404, fmt.Sprintf("No conversation exists with ID %d", conversationID)))
+	}
+
+	// Mark conversation as read
+	markedAt := time.Now()
+	if err := markConversationAsRead(userID, conversationID); err != nil {
+		log.Error("Failed to mark conversation as read:", err)
+		return response.Error(response.NewErrorWithDetails(response.ErrorCodeDatabaseError, "Failed to mark conversation as read", 500, err.Error()))
+	}
 
 	return response.OK(map[string]interface{}{
 		"conversation_id": conversationID,
-		"marked_read_at":  "2025-01-21T15:00:00Z",
+		"marked_read_at":  markedAt.Format(time.RFC3339),
 	})
 }
 
@@ -2540,4 +2585,56 @@ func (c AgentController) DeleteUserAvatar(request *evo.Request) any {
 	return response.OK(map[string]interface{}{
 		"message": "Avatar deleted successfully",
 	})
+}
+
+// Helper functions for unread message tracking
+
+// getUnreadCountForConversation returns the number of unread messages for a user in a conversation
+func getUnreadCountForConversation(userID uuid.UUID, conversationID uint) int64 {
+	// Get user's last read timestamp for this conversation
+	var readStatus models.ConversationReadStatus
+	err := db.Where("user_id = ? AND conversation_id = ?", userID, conversationID).First(&readStatus).Error
+
+	var count int64
+	if err != nil {
+		// No read status means all messages are unread (excluding user's own messages)
+		db.Model(&models.Message{}).
+			Where("conversation_id = ? AND user_id != ? AND user_id IS NOT NULL", conversationID, userID).
+			Count(&count)
+	} else {
+		// Count messages after last read time (excluding user's own messages)
+		db.Model(&models.Message{}).
+			Where("conversation_id = ? AND created_at > ? AND user_id != ? AND user_id IS NOT NULL", conversationID, readStatus.LastReadAt, userID).
+			Count(&count)
+	}
+	return count
+}
+
+// getTotalUnreadCount returns the total unread count across all conversations for a user
+func getTotalUnreadCount(userID uuid.UUID) int64 {
+	var total int64
+
+	// Get all conversations where the user is assigned
+	var conversationIDs []uint
+	db.Model(&models.ConversationAssignment{}).
+		Where("user_id = ?", userID).
+		Pluck("conversation_id", &conversationIDs)
+
+	for _, convID := range conversationIDs {
+		total += getUnreadCountForConversation(userID, convID)
+	}
+
+	return total
+}
+
+// markConversationAsRead updates or creates a read status record for a user/conversation
+func markConversationAsRead(userID uuid.UUID, conversationID uint) error {
+	readStatus := models.ConversationReadStatus{
+		UserID:         userID,
+		ConversationID: conversationID,
+		LastReadAt:     time.Now(),
+	}
+
+	// Use upsert: update if exists, create if not
+	return db.Save(&readStatus).Error
 }

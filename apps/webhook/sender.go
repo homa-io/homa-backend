@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"strings"
 	"time"
@@ -12,6 +13,13 @@ import (
 	"github.com/getevo/evo/v2/lib/db"
 	"github.com/getevo/evo/v2/lib/log"
 	"github.com/iesreza/homa-backend/apps/models"
+)
+
+// Retry configuration
+const (
+	MaxRetries     = 5
+	InitialBackoff = 1 * time.Second
+	MaxBackoff     = 60 * time.Second
 )
 
 // WebhookPayload represents the structure of data sent to webhooks
@@ -162,4 +170,66 @@ func logWebhookDeliveryFull(webhookID uint, event string, success bool, url, bod
 // logWebhookDelivery logs webhook delivery attempts (simplified version for backward compatibility)
 func logWebhookDelivery(webhookID uint, event string, success bool, message string) {
 	logWebhookDeliveryFull(webhookID, event, success, "", "", "", 0, message, 0)
+}
+
+// SendWebhookWithRetry sends a webhook with exponential backoff retry logic
+// Retries up to MaxRetries times on failure with exponential backoff
+func SendWebhookWithRetry(webhook *models.Webhook, event string, data map[string]any) error {
+	var lastErr error
+
+	for attempt := 0; attempt <= MaxRetries; attempt++ {
+		err := SendWebhook(webhook, event, data)
+		if err == nil {
+			if attempt > 0 {
+				log.Info("Webhook succeeded on retry %d for %s to %s", attempt, event, webhook.URL)
+			}
+			return nil
+		}
+
+		lastErr = err
+
+		// Don't retry on the last attempt
+		if attempt == MaxRetries {
+			break
+		}
+
+		// Calculate backoff with exponential delay
+		backoff := calculateBackoff(attempt)
+		log.Warning("Webhook failed (attempt %d/%d) for %s to %s: %v. Retrying in %v",
+			attempt+1, MaxRetries+1, event, webhook.URL, err, backoff)
+
+		time.Sleep(backoff)
+	}
+
+	log.Error("Webhook failed after %d attempts for %s to %s: %v",
+		MaxRetries+1, event, webhook.URL, lastErr)
+	return fmt.Errorf("webhook failed after %d retries: %w", MaxRetries, lastErr)
+}
+
+// calculateBackoff calculates exponential backoff with jitter
+func calculateBackoff(attempt int) time.Duration {
+	// Exponential backoff: 1s, 2s, 4s, 8s, 16s (capped at MaxBackoff)
+	backoff := float64(InitialBackoff) * math.Pow(2, float64(attempt))
+	if backoff > float64(MaxBackoff) {
+		backoff = float64(MaxBackoff)
+	}
+	return time.Duration(backoff)
+}
+
+// BroadcastWebhookWithRetry sends a webhook event to all registered webhooks with retry logic
+func BroadcastWebhookWithRetry(event string, data map[string]any) {
+	var webhooks []models.Webhook
+	if err := db.Where("enabled = ?", true).Find(&webhooks).Error; err != nil {
+		log.Error("Failed to fetch webhooks for broadcast:", err)
+		return
+	}
+
+	for _, webhook := range webhooks {
+		// Send webhook asynchronously with retry
+		go func(w models.Webhook) {
+			if err := SendWebhookWithRetry(&w, event, data); err != nil {
+				log.Error("Failed to send webhook (with retries) to", w.URL, ":", err)
+			}
+		}(webhook)
+	}
 }

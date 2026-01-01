@@ -5,9 +5,18 @@ import (
 	"github.com/getevo/evo/v2/lib/log"
 	"github.com/getevo/evo/v2/lib/settings"
 	"github.com/getevo/restify"
+	"github.com/gofiber/fiber/v2"
+	"github.com/gofiber/fiber/v2/middleware/limiter"
 	"github.com/gofiber/fiber/v2/middleware/logger"
 	"strings"
 	"time"
+)
+
+// Request size limits
+const (
+	MaxBodySize       = 1 * 1024 * 1024  // 1MB for regular requests
+	MaxUploadSize     = 25 * 1024 * 1024 // 25MB for file uploads
+	RateLimitRequests = 100              // requests per minute
 )
 
 var StartupTime = time.Now()
@@ -33,10 +42,28 @@ func (a App) Register() error {
 		log.SetLevel(log.WarningLevel)
 	}
 
+	var app = evo.GetFiber()
+
+	// Enable request logging if configured
 	if settings.Get("APP.LOG_REQUESTS").Bool() {
-		var app = evo.GetFiber()
-		// Enable request logging
 		app.Use(logger.New())
+	}
+
+	// Add rate limiting middleware (100 requests per minute per IP)
+	if settings.Get("APP.RATE_LIMIT", true).Bool() {
+		app.Use(limiter.New(limiter.Config{
+			Max:        RateLimitRequests,
+			Expiration: 1 * time.Minute,
+			KeyGenerator: func(c *fiber.Ctx) string {
+				return c.IP()
+			},
+			LimitReached: func(c *fiber.Ctx) error {
+				return c.Status(429).JSON(fiber.Map{
+					"error": "Too many requests. Please try again later.",
+				})
+			},
+		}))
+		log.Info("Rate limiting enabled: %d requests per minute", RateLimitRequests)
 	}
 
 	restify.SetPrefix("/api/restify")

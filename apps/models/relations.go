@@ -1,9 +1,11 @@
 package models
 
 import (
-	"github.com/iesreza/homa-backend/apps/auth"
+	"time"
+
 	"github.com/getevo/restify"
 	"github.com/google/uuid"
+	"github.com/iesreza/homa-backend/apps/auth"
 )
 
 type ConversationAssignment struct {
@@ -53,4 +55,17 @@ type UserDepartment struct {
 
 func (UserDepartment) TableName() string {
 	return "user_departments"
+}
+
+// ConversationReadStatus tracks when each user last read a conversation
+type ConversationReadStatus struct {
+	UserID         uuid.UUID `gorm:"column:user_id;type:char(36);primaryKey;fk:users" json:"user_id"`
+	ConversationID uint      `gorm:"column:conversation_id;primaryKey;fk:conversations" json:"conversation_id"`
+	LastReadAt     time.Time `gorm:"column:last_read_at;index" json:"last_read_at"`
+
+	restify.API
+}
+
+func (ConversationReadStatus) TableName() string {
+	return "conversation_read_status"
 }
