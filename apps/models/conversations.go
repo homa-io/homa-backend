@@ -173,6 +173,11 @@ func (c *Conversation) AfterCreate(tx *gorm.DB) error {
 
 // AfterUpdate hook - broadcast conversation update to NATS and webhooks
 func (c *Conversation) AfterUpdate(tx *gorm.DB) error {
+	// Check if department changed and auto-assign department users
+	if tx.Statement.Changed("DepartmentID") && c.DepartmentID != nil {
+		go c.assignDepartmentUsers(tx)
+	}
+
 	// Broadcast to NATS
 	go func() {
 		subject := fmt.Sprintf("conversation.%d", c.ID)
@@ -224,6 +229,59 @@ func (c *Conversation) AfterUpdate(tx *gorm.DB) error {
 	}()
 
 	return nil
+}
+
+// assignDepartmentUsers automatically assigns all users from the conversation's department
+// This is called when a conversation is created or updated with a department_id
+func (c *Conversation) assignDepartmentUsers(tx *gorm.DB) {
+	if c.DepartmentID == nil {
+		return
+	}
+
+	// Get all users assigned to this department
+	var userDepartments []UserDepartment
+	if err := db.Where("department_id = ?", *c.DepartmentID).Find(&userDepartments).Error; err != nil {
+		log.Error("Failed to get department users for auto-assignment: %v", err)
+		return
+	}
+
+	if len(userDepartments) == 0 {
+		return
+	}
+
+	// Get existing user assignments for this conversation
+	var existingAssignments []ConversationAssignment
+	if err := db.Where("conversation_id = ? AND user_id IS NOT NULL", c.ID).Find(&existingAssignments).Error; err != nil {
+		log.Error("Failed to get existing assignments: %v", err)
+		return
+	}
+
+	// Create a map of existing user assignments
+	existingUserIDs := make(map[string]bool)
+	for _, a := range existingAssignments {
+		if a.UserID != nil {
+			existingUserIDs[a.UserID.String()] = true
+		}
+	}
+
+	// Create assignments for users not already assigned
+	for _, ud := range userDepartments {
+		if existingUserIDs[ud.UserID.String()] {
+			continue // Skip if already assigned
+		}
+
+		assignment := ConversationAssignment{
+			ConversationID: c.ID,
+			UserID:         &ud.UserID,
+			DepartmentID:   c.DepartmentID,
+		}
+
+		if err := db.Create(&assignment).Error; err != nil {
+			log.Error("Failed to auto-assign user %s to conversation %d: %v", ud.UserID, c.ID, err)
+		} else {
+			log.Info("Auto-assigned user %s to conversation %d from department %d", ud.UserID, c.ID, *c.DepartmentID)
+		}
+	}
 }
 
 // GORM Hooks for Message

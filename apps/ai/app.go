@@ -4,6 +4,8 @@ import (
 	"github.com/getevo/evo/v2"
 	"github.com/getevo/evo/v2/lib/log"
 	"github.com/getevo/evo/v2/lib/settings"
+	natsconn "github.com/iesreza/homa-backend/apps/nats"
+	"github.com/nats-io/nats.go"
 )
 
 // App represents the AI application
@@ -57,6 +59,18 @@ func (a App) Router() error {
 
 // WhenReady is called when the app is ready
 func (a App) WhenReady() error {
+	// Subscribe to settings reload events
+	if natsconn.IsConnected() {
+		_, err := natsconn.Subscribe("settings.ai.reload", func(msg *nats.Msg) {
+			log.Info("Received AI settings reload message")
+			ReloadSettings()
+		})
+		if err != nil {
+			log.Warning("Failed to subscribe to settings.ai.reload: %v", err)
+		} else {
+			log.Info("Subscribed to settings.ai.reload for realtime settings updates")
+		}
+	}
 	return nil
 }
 

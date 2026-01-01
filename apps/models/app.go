@@ -32,6 +32,9 @@ func (a App) Register() error {
 	db.UseModel(KnowledgeBaseChunk{})
 	db.UseModel(KnowledgeBaseMedia{})
 
+	// Settings model
+	db.UseModel(Setting{})
+
 	return nil
 }
 

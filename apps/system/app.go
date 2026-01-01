@@ -53,6 +53,14 @@ func (a App) Router() error {
 	evo.Get("/api/system/departments", controller.GetDepartments)
 	evo.Get("/api/system/ticket-status", controller.GetTicketStatuses)
 
+	// Settings APIs (admin only)
+	evo.Use("/api/settings", controller.AdminMiddleware)
+	evo.Get("/api/settings", controller.GetSettings)
+	evo.Put("/api/settings", controller.UpdateSettings)
+	evo.Get("/api/settings/:key", controller.GetSetting)
+	evo.Put("/api/settings/:key", controller.SetSetting)
+	evo.Delete("/api/settings/:key", controller.DeleteSetting)
+
 	// Serve static files
 	evo.Static("/static", "./static")
 	evo.Static("/uploads", "./uploads")

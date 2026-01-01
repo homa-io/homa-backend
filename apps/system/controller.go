@@ -6,7 +6,9 @@ import (
 
 	"github.com/getevo/evo/v2"
 	"github.com/getevo/evo/v2/lib/db"
+	"github.com/getevo/evo/v2/lib/log"
 	"github.com/iesreza/homa-backend/apps/models"
+	natsconn "github.com/iesreza/homa-backend/apps/nats"
 	"github.com/iesreza/homa-backend/lib/response"
 )
 
@@ -131,4 +133,173 @@ func (c Controller) ServeDashboard(request *evo.Request) any {
 
 func (c Controller) ServeLoginPage(request *evo.Request) any {
 	return request.SendFile("./static/dashboard/login.html")
+}
+
+// SettingsResponse represents the response for settings endpoints
+type SettingsResponse struct {
+	Settings map[string]string `json:"settings"`
+}
+
+// SettingUpdateRequest represents a request to update settings
+type SettingUpdateRequest struct {
+	Settings map[string]string `json:"settings"`
+}
+
+// GetSettings returns all settings or settings by category
+// @Summary Get settings
+// @Description Get all settings or filter by category
+// @Tags Settings
+// @Accept json
+// @Produce json
+// @Param category query string false "Category filter (ai, workflow, general)"
+// @Success 200 {object} SettingsResponse
+// @Router /api/settings [get]
+func (c Controller) GetSettings(req *evo.Request) interface{} {
+	category := req.Query("category").String()
+
+	var settings []models.Setting
+	var err error
+
+	if category != "" {
+		settings, err = models.GetSettingsByCategory(category)
+	} else {
+		settings, err = models.GetAllSettings()
+	}
+
+	if err != nil {
+		return response.Error(response.ErrDatabaseError)
+	}
+
+	// Convert to map for easier frontend consumption
+	result := make(map[string]string)
+	for _, s := range settings {
+		result[s.Key] = s.Value
+	}
+
+	return response.OK(result)
+}
+
+// UpdateSettings updates multiple settings at once
+// @Summary Update settings
+// @Description Update one or more settings
+// @Tags Settings
+// @Accept json
+// @Produce json
+// @Param body body SettingUpdateRequest true "Settings to update"
+// @Success 200 {object} response.Response
+// @Router /api/settings [put]
+func (c Controller) UpdateSettings(req *evo.Request) interface{} {
+	var request SettingUpdateRequest
+	if err := req.BodyParser(&request); err != nil {
+		return response.Error(response.ErrInvalidInput)
+	}
+
+	if len(request.Settings) == 0 {
+		return response.Error(response.NewError(response.ErrorCodeInvalidInput, "No settings provided", 400))
+	}
+
+	// Update settings
+	if err := models.BulkUpdateSettings(request.Settings); err != nil {
+		return response.Error(response.ErrDatabaseError)
+	}
+
+	// Publish NATS message if AI settings were updated
+	for key := range request.Settings {
+		if key == "ai.endpoint" || key == "ai.api_key" || key == "ai.model" {
+			if natsconn.IsConnected() {
+				if err := natsconn.Publish("settings.ai.reload", []byte("reload")); err != nil {
+					log.Warning("Failed to publish AI settings reload: %v", err)
+				} else {
+					log.Info("Published AI settings reload message via NATS")
+				}
+			}
+			break
+		}
+	}
+
+	return response.OK("Settings updated successfully")
+}
+
+// GetSetting returns a single setting by key
+// @Summary Get single setting
+// @Description Get a single setting by key
+// @Tags Settings
+// @Accept json
+// @Produce json
+// @Param key path string true "Setting key"
+// @Success 200 {object} models.Setting
+// @Router /api/settings/{key} [get]
+func (c Controller) GetSetting(req *evo.Request) interface{} {
+	key := req.Param("key").String()
+	if key == "" {
+		return response.Error(response.NewError(response.ErrorCodeInvalidInput, "Key is required", 400))
+	}
+
+	setting, err := models.GetSetting(key)
+	if err != nil {
+		return response.Error(response.NewError(response.ErrorCodeNotFound, "Setting not found", 404))
+	}
+
+	return response.OK(setting)
+}
+
+// SetSetting creates or updates a single setting
+// @Summary Set single setting
+// @Description Create or update a single setting
+// @Tags Settings
+// @Accept json
+// @Produce json
+// @Param key path string true "Setting key"
+// @Param body body models.Setting true "Setting data"
+// @Success 200 {object} response.Response
+// @Router /api/settings/{key} [put]
+func (c Controller) SetSetting(req *evo.Request) interface{} {
+	key := req.Param("key").String()
+	if key == "" {
+		return response.Error(response.NewError(response.ErrorCodeInvalidInput, "Key is required", 400))
+	}
+
+	var setting models.Setting
+	if err := req.BodyParser(&setting); err != nil {
+		return response.Error(response.ErrInvalidInput)
+	}
+
+	if err := models.SetSetting(key, setting.Value, setting.Type, setting.Category, setting.Label); err != nil {
+		return response.Error(response.ErrDatabaseError)
+	}
+
+	// Publish NATS message if AI settings were updated
+	if key == "ai.endpoint" || key == "ai.api_key" || key == "ai.model" {
+		if natsconn.IsConnected() {
+			if err := natsconn.Publish("settings.ai.reload", []byte("reload")); err != nil {
+				log.Warning("Failed to publish AI settings reload: %v", err)
+			} else {
+				log.Info("Published AI settings reload message via NATS")
+			}
+		}
+	}
+
+	return response.OK("Setting updated successfully")
+}
+
+// DeleteSetting deletes a setting by key
+// @Summary Delete setting
+// @Description Delete a setting by key
+// @Tags Settings
+// @Accept json
+// @Produce json
+// @Param key path string true "Setting key"
+// @Success 200 {object} response.Response
+// @Router /api/settings/{key} [delete]
+func (c Controller) DeleteSetting(req *evo.Request) interface{} {
+	key := req.Param("key").String()
+	if key == "" {
+		return response.Error(response.NewError(response.ErrorCodeInvalidInput, "Key is required", 400))
+	}
+
+	if err := models.DeleteSetting(key); err != nil {
+		return response.Error(response.ErrDatabaseError)
+	}
+
+	return response.OK("Setting deleted successfully")
 }
