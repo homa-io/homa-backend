@@ -1,12 +1,13 @@
 package system
 
 import (
-	"github.com/iesreza/homa-backend/apps/auth"
 	"time"
 
 	"github.com/getevo/evo/v2"
 	"github.com/getevo/evo/v2/lib/db"
 	"github.com/getevo/evo/v2/lib/log"
+	"github.com/google/uuid"
+	"github.com/iesreza/homa-backend/apps/auth"
 	"github.com/iesreza/homa-backend/apps/models"
 	natsconn "github.com/iesreza/homa-backend/apps/nats"
 	"github.com/iesreza/homa-backend/lib/response"
@@ -302,4 +303,71 @@ func (c Controller) DeleteSetting(req *evo.Request) interface{} {
 	}
 
 	return response.OK("Setting deleted successfully")
+}
+
+// GetActivityLogs returns activity logs with filtering and pagination
+// @Summary Get activity logs
+// @Description Get activity logs with optional filtering by entity type, entity ID, action, and user
+// @Tags Activity Logs
+// @Accept json
+// @Produce json
+// @Param entity_type query string false "Entity type filter (conversation, client, user, etc.)"
+// @Param entity_id query string false "Entity ID filter"
+// @Param action query string false "Action filter (create, update, delete, etc.)"
+// @Param user_id query string false "User ID filter (UUID)"
+// @Param limit query int false "Limit (default 50, max 100)"
+// @Param offset query int false "Offset for pagination"
+// @Success 200 {object} response.Response
+// @Router /api/activity-logs [get]
+func (c Controller) GetActivityLogs(req *evo.Request) interface{} {
+	entityType := req.Query("entity_type").String()
+	entityID := req.Query("entity_id").String()
+	action := req.Query("action").String()
+	userIDStr := req.Query("user_id").String()
+	limit := req.Query("limit").Int()
+	offset := req.Query("offset").Int()
+
+	var userID *uuid.UUID
+	if userIDStr != "" {
+		parsedID, err := uuid.Parse(userIDStr)
+		if err != nil {
+			return response.Error(response.NewError(response.ErrorCodeInvalidInput, "Invalid user ID format", 400))
+		}
+		userID = &parsedID
+	}
+
+	logs, total, err := models.GetActivityLogs(entityType, entityID, action, userID, limit, offset)
+	if err != nil {
+		return response.Error(response.ErrDatabaseError)
+	}
+
+	return response.ListWithTotal(logs, int(total))
+}
+
+// GetEntityActivityLogs returns activity logs for a specific entity
+// @Summary Get entity activity logs
+// @Description Get activity logs for a specific entity by type and ID
+// @Tags Activity Logs
+// @Accept json
+// @Produce json
+// @Param entity_type path string true "Entity type (conversation, client, user, etc.)"
+// @Param entity_id path string true "Entity ID"
+// @Param limit query int false "Limit (default 50)"
+// @Success 200 {object} response.Response
+// @Router /api/activity-logs/{entity_type}/{entity_id} [get]
+func (c Controller) GetEntityActivityLogs(req *evo.Request) interface{} {
+	entityType := req.Param("entity_type").String()
+	entityID := req.Param("entity_id").String()
+	limit := req.Query("limit").Int()
+
+	if entityType == "" || entityID == "" {
+		return response.Error(response.NewError(response.ErrorCodeInvalidInput, "Entity type and ID are required", 400))
+	}
+
+	logs, err := models.GetEntityActivityLogs(entityType, entityID, limit)
+	if err != nil {
+		return response.Error(response.ErrDatabaseError)
+	}
+
+	return response.List(logs, len(logs))
 }

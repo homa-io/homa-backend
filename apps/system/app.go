@@ -99,6 +99,11 @@ func (a App) Router() error {
 
 	evo.Use("/api/restify", controller.AdminMiddleware)
 
+	// Activity Logs APIs (admin only)
+	evo.Use("/api/activity-logs", controller.AdminMiddleware)
+	evo.Get("/api/activity-logs", controller.GetActivityLogs)
+	evo.Get("/api/activity-logs/:entity_type/:entity_id", controller.GetEntityActivityLogs)
+
 	return nil
 }
 

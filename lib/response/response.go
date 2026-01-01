@@ -357,6 +357,16 @@ func List(data interface{}, count int) outcome.Response {
 	return OKWithMeta(data, meta)
 }
 
+// ListWithTotal creates a response for lists/collections with count and total
+func ListWithTotal(data interface{}, total int) outcome.Response {
+	meta := &Meta{
+		Count: total,
+		Total: int64(total),
+	}
+
+	return OKWithMeta(data, meta)
+}
+
 // Message creates a response with only a success message
 func Message(message string) outcome.Response {
 	return outcome.Response{

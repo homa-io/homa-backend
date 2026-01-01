@@ -20,6 +20,7 @@ func (a App) Register() error {
 	db.UseModel(ConversationTag{})
 	db.UseModel(UserDepartment{})
 	db.UseModel(ConversationReadStatus{})
+	db.UseModel(ActivityLog{})
 	db.UseModel(CustomAttribute{})
 	db.UseModel(Webhook{})
 	db.UseModel(WebhookDelivery{})
