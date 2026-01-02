@@ -125,8 +125,27 @@ func (d *Driver) GetMaskedConfig(configJSON string) map[string]interface{} {
 // OnSave is called after the integration is saved.
 // Slack uses event subscriptions configured in the Slack app settings, so no auto-registration is needed.
 func (d *Driver) OnSave(configJSON string, status string, webhookBaseURL string) drivers.OnSaveResult {
+	webhookURL := webhookBaseURL + "/api/integrations/webhooks/slack"
+
+	instructions := `Slack integration saved successfully!
+
+To complete setup, configure event subscriptions in your Slack App:
+
+1. Go to https://api.slack.com/apps
+2. Select your app
+3. Navigate to "Event Subscriptions" (left sidebar)
+4. Enable Events by toggling "Enable Events"
+5. Set the Request URL to: ` + webhookURL + `
+6. Slack will verify the URL (should show "Verified")
+7. Under "Subscribe to bot events", add:
+   - message.channels (receive messages from channels)
+   - message.groups (receive messages from private channels)
+8. Click "Save Changes"
+
+Your bot will now receive messages from Slack channels.`
+
 	return drivers.OnSaveResult{
 		Success: true,
-		Message: "Slack integration saved. Configure event subscriptions in your Slack App settings.",
+		Message: instructions,
 	}
 }

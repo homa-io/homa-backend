@@ -126,8 +126,33 @@ func (d *Driver) GetMaskedConfig(configJSON string) map[string]interface{} {
 // OnSave is called after the integration is saved.
 // WhatsApp webhooks are configured in the Meta Developer Console.
 func (d *Driver) OnSave(configJSON string, status string, webhookBaseURL string) drivers.OnSaveResult {
+	webhookURL := webhookBaseURL + "/api/integrations/webhooks/whatsapp"
+
+	instructions := `WhatsApp integration saved successfully!
+
+To complete setup, configure the webhook in Meta Developer Console:
+
+1. Go to https://developers.facebook.com/
+2. Select your App
+3. Navigate to "Whatsapp" > "Configuration"
+4. Under "Webhook", click "Edit"
+5. Set the Callback URL to: ` + webhookURL + `
+6. Verify Token: Use the "Webhook Verify Token" from your integration config
+7. Click "Verify and Save"
+8. Meta will send a verification request to confirm the URL
+9. Once verified, enable message delivery notifications
+
+Event Subscriptions to enable:
+- messages (receive incoming messages)
+- message_status (track delivery status of outgoing messages)
+
+After setup, your WhatsApp business account will send messages to this dashboard.
+
+Note: Ensure your WhatsApp phone number is connected to your Business Account
+and has the required permissions for sending/receiving messages.`
+
 	return drivers.OnSaveResult{
 		Success: true,
-		Message: "WhatsApp integration saved. Configure webhook in Meta Developer Console.",
+		Message: instructions,
 	}
 }

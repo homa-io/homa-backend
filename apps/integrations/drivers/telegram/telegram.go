@@ -207,8 +207,33 @@ func (d *Driver) OnSave(configJSON string, status string, webhookBaseURL string)
 		return drivers.OnSaveResult{Success: false, Message: "Failed to register webhook", Details: desc}
 	}
 
+	instructions := fmt.Sprintf(`Telegram integration setup completed!
+
+Webhook registered successfully at: %s
+
+Your Telegram bot is now ready to receive messages:
+
+1. Add your bot to Telegram channels or chat with it directly
+2. Messages will appear as conversations in your dashboard
+3. Reply to conversations in the dashboard to send messages back via Telegram
+
+Bot Configuration:
+- Webhook is active and receiving updates
+- Allowed updates: messages and callback queries
+- Your bot is listening for incoming messages
+
+To test the integration:
+1. Find your bot on Telegram (@YourBotName)
+2. Send a test message
+3. The message should appear as a new conversation in your dashboard
+
+If messages are not appearing, check:
+- Bot is added to the channel/group
+- Webhook URL is accessible from the internet
+- Bot has proper permissions in your Telegram workspace`, webhookURL)
+
 	return drivers.OnSaveResult{
 		Success: true,
-		Message: fmt.Sprintf("Telegram webhook registered: %s", webhookURL),
+		Message: instructions,
 	}
 }
