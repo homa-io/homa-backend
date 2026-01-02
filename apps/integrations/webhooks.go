@@ -748,7 +748,7 @@ func toTitle(s string) string {
 // Outbound Message Sending
 // =============================================================================
 
-// SendSlackMessage sends a message to Slack
+// SendSlackMessage sends a message to Slack using chat.postMessage API
 func SendSlackMessage(channelID, text string) error {
 	integration, err := models.GetIntegration(models.IntegrationTypeSlack)
 	if err != nil || integration.Status != models.IntegrationStatusEnabled {
@@ -760,9 +760,63 @@ func SendSlackMessage(channelID, text string) error {
 		return fmt.Errorf("invalid Slack config: %w", err)
 	}
 
-	// Implementation for sending would go here
-	// Using Slack's chat.postMessage API
-	log.Info("Would send Slack message to %s: %s", channelID, truncateString(text, 50))
+	if config.BotToken == "" {
+		return fmt.Errorf("Slack bot token not configured")
+	}
+
+	// Call Slack chat.postMessage API
+	apiURL := "https://slack.com/api/chat.postMessage"
+
+	payload := map[string]interface{}{
+		"channel": channelID,
+		"text":    text,
+	}
+
+	payloadBytes, err := json.Marshal(payload)
+	if err != nil {
+		return fmt.Errorf("failed to marshal payload: %w", err)
+	}
+
+	req, err := http.NewRequest("POST", apiURL, bytes.NewBuffer(payloadBytes))
+	if err != nil {
+		return fmt.Errorf("failed to create request: %w", err)
+	}
+
+	// Set headers
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", config.BotToken))
+
+	// Execute request
+	client := &http.Client{}
+	resp, err := client.Do(req)
+	if err != nil {
+		return fmt.Errorf("failed to send Slack message: %w", err)
+	}
+	defer resp.Body.Close()
+
+	// Read response
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return fmt.Errorf("failed to read response: %w", err)
+	}
+
+	// Parse Slack API response
+	var slackResp struct {
+		OK    bool   `json:"ok"`
+		Error string `json:"error,omitempty"`
+	}
+
+	if err := json.Unmarshal(body, &slackResp); err != nil {
+		return fmt.Errorf("failed to parse Slack response: %w", err)
+	}
+
+	// Check if Slack returned an error
+	if !slackResp.OK {
+		log.Error("Slack API error: %s", slackResp.Error)
+		return fmt.Errorf("Slack API error: %s", slackResp.Error)
+	}
+
+	log.Info("Sent Slack message to %s: %s", channelID, truncateString(text, 50))
 	return nil
 }
 
@@ -812,7 +866,7 @@ func SendTelegramMessage(chatID, text string) error {
 	return nil
 }
 
-// SendWhatsAppMessage sends a message to WhatsApp
+// SendWhatsAppMessage sends a message to WhatsApp using the Business API
 func SendWhatsAppMessage(phoneNumber, text string) error {
 	integration, err := models.GetIntegration(models.IntegrationTypeWhatsApp)
 	if err != nil || integration.Status != models.IntegrationStatusEnabled {
@@ -824,9 +878,81 @@ func SendWhatsAppMessage(phoneNumber, text string) error {
 		return fmt.Errorf("invalid WhatsApp config: %w", err)
 	}
 
-	// Implementation for sending would go here
-	// Using WhatsApp Business API's messages endpoint
-	log.Info("Would send WhatsApp message to %s: %s", phoneNumber, truncateString(text, 50))
+	// Validate required fields
+	if config.PhoneNumberID == "" {
+		return fmt.Errorf("WhatsApp phone number ID not configured")
+	}
+	if config.AccessToken == "" {
+		return fmt.Errorf("WhatsApp access token not configured")
+	}
+
+	// Call WhatsApp Business API messages endpoint
+	apiURL := fmt.Sprintf("https://graph.instagram.com/v18.0/%s/messages", config.PhoneNumberID)
+
+	payload := map[string]interface{}{
+		"messaging_product": "whatsapp",
+		"to":                phoneNumber,
+		"type":              "text",
+		"text": map[string]interface{}{
+			"body": text,
+		},
+	}
+
+	payloadBytes, err := json.Marshal(payload)
+	if err != nil {
+		return fmt.Errorf("failed to marshal payload: %w", err)
+	}
+
+	req, err := http.NewRequest("POST", apiURL, bytes.NewBuffer(payloadBytes))
+	if err != nil {
+		return fmt.Errorf("failed to create request: %w", err)
+	}
+
+	// Set headers
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", config.AccessToken))
+
+	// Execute request
+	client := &http.Client{}
+	resp, err := client.Do(req)
+	if err != nil {
+		return fmt.Errorf("failed to send WhatsApp message: %w", err)
+	}
+	defer resp.Body.Close()
+
+	// Read response
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return fmt.Errorf("failed to read response: %w", err)
+	}
+
+	// Parse WhatsApp API response
+	var waResp struct {
+		Messages []struct {
+			ID string `json:"id"`
+		} `json:"messages,omitempty"`
+		Error struct {
+			Message string `json:"message,omitempty"`
+			Code    int    `json:"code,omitempty"`
+		} `json:"error,omitempty"`
+	}
+
+	if err := json.Unmarshal(body, &waResp); err != nil {
+		return fmt.Errorf("failed to parse WhatsApp response: %w", err)
+	}
+
+	// Check if WhatsApp returned an error
+	if waResp.Error.Message != "" {
+		log.Error("WhatsApp API error: %s (code: %d)", waResp.Error.Message, waResp.Error.Code)
+		return fmt.Errorf("WhatsApp API error: %s", waResp.Error.Message)
+	}
+
+	// Verify message was sent
+	if len(waResp.Messages) == 0 {
+		return fmt.Errorf("WhatsApp API did not return a message ID")
+	}
+
+	log.Info("Sent WhatsApp message to %s: %s (ID: %s)", phoneNumber, truncateString(text, 50), waResp.Messages[0].ID)
 	return nil
 }
 
