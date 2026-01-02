@@ -39,6 +39,7 @@ func (a App) Router() error {
 	evo.Get("/api/agent/conversations/unread-count", agentController.GetUnreadCount)
 	evo.Patch("/api/agent/conversations/:id/read", agentController.MarkConversationRead)
 	evo.Get("/api/agent/departments", agentController.GetDepartments)
+	evo.Get("/api/agent/me/departments", agentController.GetMyDepartments)
 	evo.Get("/api/agent/users", agentController.GetUsers)
 	evo.Get("/api/agent/tags", agentController.GetTags)
 	evo.Post("/api/agent/tags", agentController.CreateTag)

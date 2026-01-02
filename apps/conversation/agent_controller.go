@@ -534,6 +534,47 @@ func (ac AgentController) GetDepartments(req *evo.Request) interface{} {
 	return response.OK(result)
 }
 
+// GetMyDepartments handles the GET /api/agent/me/departments endpoint
+// @Summary Get current user's departments
+// @Description Get list of departments the current user belongs to
+// @Tags Agent - Departments
+// @Accept json
+// @Produce json
+// @Success 200 {object} []models.Department
+// @Router /api/agent/me/departments [get]
+func (ac AgentController) GetMyDepartments(req *evo.Request) interface{} {
+	user := req.User().(*auth.User)
+	if user.Anonymous() {
+		return response.Error(response.ErrUnauthorized)
+	}
+
+	// Get department IDs for this user
+	var userDepartments []models.UserDepartment
+	if err := db.Where("user_id = ?", user.UserID).Find(&userDepartments).Error; err != nil {
+		log.Error("Failed to get user departments:", err)
+		return response.Error(response.NewErrorWithDetails(response.ErrorCodeDatabaseError, "Failed to get user departments", 500, err.Error()))
+	}
+
+	if len(userDepartments) == 0 {
+		return response.OK([]models.Department{})
+	}
+
+	// Get department IDs
+	deptIDs := make([]uint, len(userDepartments))
+	for i, ud := range userDepartments {
+		deptIDs[i] = ud.DepartmentID
+	}
+
+	// Get the actual departments
+	var departments []models.Department
+	if err := db.Where("id IN ?", deptIDs).Find(&departments).Error; err != nil {
+		log.Error("Failed to get departments:", err)
+		return response.Error(response.NewErrorWithDetails(response.ErrorCodeDatabaseError, "Failed to get departments", 500, err.Error()))
+	}
+
+	return response.OK(departments)
+}
+
 // GetUsers handles the GET /api/agent/users endpoint
 func (ac AgentController) GetUsers(req *evo.Request) interface{} {
 	var users []auth.User
