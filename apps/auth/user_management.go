@@ -121,6 +121,7 @@ func (c Controller) CreateUser(request *evo.Request) interface{} {
 		Type        string  `json:"type"`
 		Avatar      *string `json:"avatar"`
 		SecurityKey *string `json:"security_key"`
+		Language    string  `json:"language"`
 	}
 
 	if err := request.BodyParser(&req); err != nil {
@@ -149,6 +150,12 @@ func (c Controller) CreateUser(request *evo.Request) interface{} {
 		displayName = req.Name + " " + req.LastName
 	}
 
+	// Set default language if not provided
+	language := req.Language
+	if language == "" {
+		language = "en"
+	}
+
 	// Create new user
 	newUser := User{
 		Name:        req.Name,
@@ -158,6 +165,7 @@ func (c Controller) CreateUser(request *evo.Request) interface{} {
 		Type:        req.Type,
 		Status:      UserStatusActive,
 		Avatar:      req.Avatar,
+		Language:    language,
 	}
 
 	// Set security_key for bot users
@@ -244,6 +252,7 @@ func (c Controller) UpdateUser(request *evo.Request) interface{} {
 		Type        *string `json:"type"`
 		Avatar      *string `json:"avatar"`
 		SecurityKey *string `json:"security_key"`
+		Language    *string `json:"language"`
 	}
 
 	if err := request.BodyParser(&req); err != nil {
@@ -282,6 +291,9 @@ func (c Controller) UpdateUser(request *evo.Request) interface{} {
 	}
 	if req.Avatar != nil {
 		targetUser.Avatar = req.Avatar
+	}
+	if req.Language != nil {
+		targetUser.Language = *req.Language
 	}
 	if req.Password != nil && *req.Password != "" {
 		if err := targetUser.SetPassword(*req.Password); err != nil {

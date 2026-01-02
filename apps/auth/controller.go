@@ -81,6 +81,7 @@ type EditProfileRequest struct {
 	DisplayName string  `json:"display_name"`
 	Avatar      *string `json:"avatar"`
 	Password    *string `json:"password"`
+	Language    *string `json:"language"`
 }
 
 type LoginRequest struct {
@@ -610,10 +611,22 @@ func (c Controller) EditProfile(req *evo.Request) interface{} {
 		return err
 	}
 
-	user.Name = params.Name
-	user.LastName = params.LastName
-	user.DisplayName = params.DisplayName
-	user.Avatar = params.Avatar
+	// Only update fields that are non-empty (for PATCH support)
+	if params.Name != "" {
+		user.Name = params.Name
+	}
+	if params.LastName != "" {
+		user.LastName = params.LastName
+	}
+	if params.DisplayName != "" {
+		user.DisplayName = params.DisplayName
+	}
+	if params.Avatar != nil {
+		user.Avatar = params.Avatar
+	}
+	if params.Language != nil && *params.Language != "" {
+		user.Language = *params.Language
+	}
 
 	if params.Password != nil && *params.Password != "" {
 		hash, err := passlib.Hash(*params.Password)

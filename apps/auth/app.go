@@ -41,6 +41,7 @@ func (a App) Router() error {
 	// Profile endpoints
 	evo.Get("/api/auth/profile", controller.GetProfile)
 	evo.Put("/api/auth/profile", controller.EditProfile)
+	evo.Patch("/api/auth/profile", controller.EditProfile)
 
 	// API Key management endpoints
 	evo.Post("/api/auth/api-key", controller.GenerateAPIKey)

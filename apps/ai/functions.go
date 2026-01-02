@@ -43,6 +43,7 @@ type ReviseResponse struct {
 // SummarizeRequest represents a summarization request
 type SummarizeRequest struct {
 	Messages []MessageInput `json:"messages"`
+	Language string         `json:"language,omitempty"` // Target language for summary (default: "en")
 }
 
 // SummarizeResponse represents a summarization response
@@ -202,6 +203,18 @@ func Summarize(req SummarizeRequest) (*SummarizeResponse, error) {
 		return nil, fmt.Errorf("OpenAI client not initialized")
 	}
 
+	// Set default language if not provided
+	language := req.Language
+	if language == "" {
+		language = "en"
+	}
+
+	// Build language instruction
+	languageInstruction := ""
+	if language != "en" {
+		languageInstruction = fmt.Sprintf("\n\nIMPORTANT: You MUST write the summary in %s language. All bullet points MUST be in %s.", language, language)
+	}
+
 	// Format messages for the AI
 	var conversationText strings.Builder
 	for i, msg := range req.Messages {
@@ -215,25 +228,30 @@ func Summarize(req SummarizeRequest) (*SummarizeResponse, error) {
 		conversationText.WriteString(fmt.Sprintf("%d. %s: %s\n", i+1, role, msg.Content))
 	}
 
-	messages := []ChatMessage{
-		{
-			Role: "system",
-			Content: `You are a conversation analyst. Summarize the given customer support conversation. Provide:
-1. A concise summary paragraph (2-3 sentences)
-2. Key points as a numbered list
+	systemPrompt := fmt.Sprintf(`You are a conversation analyst. Extract key points from the given customer support conversation.
+
+Create a bullet point list describing the main events, formatted as:
+- User requested X
+- Agent responded with Y
+- User confirmed/rejected Z
+
+Keep each point concise (one line). Focus on requests, responses, and outcomes.%s
 
 Format your response as:
-SUMMARY:
-[Your summary here]
-
 KEY POINTS:
-1. [Point 1]
-2. [Point 2]
-...`,
+- [First point]
+- [Second point]
+- [Third point]
+...`, languageInstruction)
+
+	messages := []ChatMessage{
+		{
+			Role:    "system",
+			Content: systemPrompt,
 		},
 		{
 			Role:    "user",
-			Content: fmt.Sprintf("Summarize this conversation:\n\n%s", conversationText.String()),
+			Content: fmt.Sprintf("Extract key points from this conversation:\n\n%s", conversationText.String()),
 		},
 	}
 
@@ -258,51 +276,32 @@ KEY POINTS:
 }
 
 // parseSummaryResponse parses the structured summary response
+// Now only extracts key points and uses them as the summary
 func parseSummaryResponse(content string) (string, []string) {
-	var summary string
 	var keyPoints []string
 
 	lines := strings.Split(content, "\n")
-	inSummary := false
 	inKeyPoints := false
 
 	for _, line := range lines {
 		line = strings.TrimSpace(line)
 
-		if strings.HasPrefix(strings.ToUpper(line), "SUMMARY:") {
-			inSummary = true
-			inKeyPoints = false
-			// Check if summary is on the same line
-			rest := strings.TrimPrefix(line, "SUMMARY:")
-			rest = strings.TrimPrefix(rest, "Summary:")
-			if rest = strings.TrimSpace(rest); rest != "" {
-				summary = rest
-			}
-			continue
-		}
-
 		if strings.HasPrefix(strings.ToUpper(line), "KEY POINTS:") || strings.HasPrefix(strings.ToUpper(line), "KEY_POINTS:") {
-			inSummary = false
 			inKeyPoints = true
 			continue
 		}
 
-		if inSummary && line != "" {
-			if summary != "" {
-				summary += " " + line
-			} else {
-				summary = line
-			}
-		}
-
 		if inKeyPoints && line != "" {
-			// Remove numbering and bullets
-			point := strings.TrimLeft(line, "0123456789.-) ")
+			// Remove numbering and bullets, extract the point text
+			point := strings.TrimLeft(line, "0123456789.-•) ")
 			if point != "" {
 				keyPoints = append(keyPoints, point)
 			}
 		}
 	}
+
+	// Join key points with newlines for display as bullet list
+	summary := strings.Join(keyPoints, "\n")
 
 	return summary, keyPoints
 }

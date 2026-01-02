@@ -41,6 +41,9 @@ func (a App) Register() error {
 	db.UseModel(UserSession{})
 	db.UseModel(UserDailyActivity{})
 
+	// Conversation summary model
+	db.UseModel(ConversationSummary{})
+
 	return nil
 }
 

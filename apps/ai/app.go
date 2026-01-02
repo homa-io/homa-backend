@@ -54,6 +54,10 @@ func (a App) Router() error {
 	// Smart reply - analyze, translate if needed, and fix grammar
 	evo.Post("/api/ai/smart-reply", controller.SmartReplyHandler)
 
+	// Conversation summary endpoints (setting is managed via /api/settings with key 'ai.conversation_summary_enabled')
+	evo.Get("/api/ai/conversation-summary/:id", controller.GetConversationSummaryHandler)
+	evo.Post("/api/ai/conversation-summary/:id/generate", controller.GenerateConversationSummaryHandler)
+
 	return nil
 }
 
