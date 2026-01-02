@@ -227,15 +227,16 @@ func (c Controller) SearchHandler(req *evo.Request) interface{} {
 		return response.Error(response.NewErrorWithDetails(response.ErrorCodeInvalidInput, "Query is required", 400, "query field cannot be empty"))
 	}
 
-	// Set defaults
+	// Set defaults from config
+	cfg := GetConfig()
 	if searchReq.Limit <= 0 {
-		searchReq.Limit = 5
+		searchReq.Limit = cfg.TopK
 	}
 	if searchReq.Limit > 20 {
 		searchReq.Limit = 20
 	}
 	if searchReq.ScoreThreshold <= 0 {
-		searchReq.ScoreThreshold = 0.7
+		searchReq.ScoreThreshold = cfg.ScoreThreshold
 	}
 
 	results, err := Search(searchReq.Query, searchReq.Limit, searchReq.ScoreThreshold)

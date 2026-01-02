@@ -3,6 +3,7 @@ package models
 import (
 	"time"
 
+	"github.com/getevo/evo/v2/lib/log"
 	"github.com/getevo/restify"
 	"github.com/google/uuid"
 	"gorm.io/gorm"
@@ -173,7 +174,7 @@ func (a *KnowledgeBaseArticle) AfterCreate(tx *gorm.DB) error {
 		go func() {
 			if err := knowledgeBaseIndexer.IndexArticle(a.ID); err != nil {
 				// Log error but don't fail the transaction
-				println("Failed to index article:", err.Error())
+				log.Error("Failed to index article %s: %v", a.ID, err)
 			}
 		}()
 	}
@@ -187,12 +188,12 @@ func (a *KnowledgeBaseArticle) AfterUpdate(tx *gorm.DB) error {
 			if a.Status == "published" {
 				// Re-index published articles
 				if err := knowledgeBaseIndexer.IndexArticle(a.ID); err != nil {
-					println("Failed to re-index article:", err.Error())
+					log.Error("Failed to re-index article %s: %v", a.ID, err)
 				}
 			} else {
 				// Remove from index if not published
 				if err := knowledgeBaseIndexer.DeleteArticleIndex(a.ID); err != nil {
-					println("Failed to delete article index:", err.Error())
+					log.Error("Failed to delete article index %s: %v", a.ID, err)
 				}
 			}
 		}()
@@ -205,7 +206,7 @@ func (a *KnowledgeBaseArticle) AfterDelete(tx *gorm.DB) error {
 	if knowledgeBaseIndexer != nil {
 		go func() {
 			if err := knowledgeBaseIndexer.DeleteArticleIndex(a.ID); err != nil {
-				println("Failed to delete article index:", err.Error())
+				log.Error("Failed to delete article index %s: %v", a.ID, err)
 			}
 		}()
 	}
