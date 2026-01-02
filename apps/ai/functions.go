@@ -228,21 +228,20 @@ func Summarize(req SummarizeRequest) (*SummarizeResponse, error) {
 		conversationText.WriteString(fmt.Sprintf("%d. %s: %s\n", i+1, role, msg.Content))
 	}
 
-	systemPrompt := fmt.Sprintf(`You are a conversation analyst. Extract key points from the given customer support conversation.
+	systemPrompt := fmt.Sprintf(`You are a conversation analyst. Summarize only the most important aspects of this customer support conversation.
 
-Create a bullet point list describing the main events, formatted as:
-- User requested X
-- Agent responded with Y
-- User confirmed/rejected Z
-
-Keep each point concise (one line). Focus on requests, responses, and outcomes.%s
+IMPORTANT RULES:
+- Focus ONLY on the main topic/issue and final resolution
+- Do NOT describe every message or exchange
+- Maximum 3-5 bullet points total
+- Skip greetings, pleasantries, and routine exchanges
+- Capture: the core problem, key decisions made, and final outcome
 
 Format your response as:
 KEY POINTS:
-- [First point]
-- [Second point]
-- [Third point]
-...`, languageInstruction)
+- [Main issue/request]
+- [Key action or decision]
+- [Resolution/outcome]%s`, languageInstruction)
 
 	messages := []ChatMessage{
 		{

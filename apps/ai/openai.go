@@ -225,7 +225,11 @@ func (c *OpenAIClient) ChatCompletion(messages []ChatMessage, maxTokens int, tem
 
 // GetEmbedding generates embeddings for the given texts
 func (c *OpenAIClient) GetEmbedding(texts []string) (*EmbeddingResponse, error) {
-	embeddingModel := settings.Get("OPENAI.EMBEDDING_MODEL", "text-embedding-3-small").String()
+	// First try database setting, then fallback to config file
+	embeddingModel := models.GetSettingValue("rag.embedding_model", "")
+	if embeddingModel == "" {
+		embeddingModel = settings.Get("OPENAI.EMBEDDING_MODEL", "text-embedding-3-small").String()
+	}
 
 	req := EmbeddingRequest{
 		Model: embeddingModel,

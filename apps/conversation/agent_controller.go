@@ -256,21 +256,85 @@ func (ac AgentController) SearchConversations(req *evo.Request) interface{} {
 		return response.Error(response.NewErrorWithDetails(response.ErrorCodeDatabaseError, "Failed to get conversations", 500, err.Error()))
 	}
 
+	// Batch load last messages and message counts for all conversations
+	conversationIDs := make([]uint, len(conversations))
+	for i, conv := range conversations {
+		conversationIDs[i] = conv.ID
+	}
+
+	// Batch load last message for each conversation (get latest message per conversation)
+	type lastMessageResult struct {
+		ConversationID uint
+		ID             uint
+		Body           string
+		CreatedAt      time.Time
+	}
+	var lastMessages []lastMessageResult
+	if err := db.Raw(`
+		SELECT m.conversation_id, m.id, m.body, m.created_at
+		FROM messages m
+		WHERE m.conversation_id IN (?)
+		AND m.id IN (
+			SELECT MAX(id) FROM messages
+			WHERE conversation_id IN (?)
+			GROUP BY conversation_id
+		)
+	`, conversationIDs, conversationIDs).
+		Scan(&lastMessages).Error; err != nil {
+		log.Error("Failed to batch load last messages:", err)
+		// Continue without last messages rather than failing the entire request
+		lastMessages = []lastMessageResult{}
+	}
+
+	// Batch load message counts for all conversations
+	type messageCountResult struct {
+		ConversationID uint
+		Count          int64
+	}
+	var messageCounts []messageCountResult
+	if err := db.Raw(`
+		SELECT conversation_id, COUNT(*) as count
+		FROM messages
+		WHERE conversation_id IN (?)
+		GROUP BY conversation_id
+	`, conversationIDs).
+		Scan(&messageCounts).Error; err != nil {
+		log.Error("Failed to batch load message counts:", err)
+		// Continue without message counts rather than failing the entire request
+		messageCounts = []messageCountResult{}
+	}
+
+	// Build maps for O(1) lookup
+	lastMessageMap := make(map[uint]lastMessageResult)
+	for _, lm := range lastMessages {
+		lastMessageMap[lm.ConversationID] = lm
+	}
+
+	messageCountMap := make(map[uint]int64)
+	for _, mc := range messageCounts {
+		messageCountMap[mc.ConversationID] = mc.Count
+	}
+
 	// Build response data
 	conversationItems := make([]ConversationListItem, 0, len(conversations))
 	for _, conv := range conversations {
-		// Get last message
-		var lastMessage models.Message
-		var hasLastMessage bool
-		if err := db.Where("conversation_id = ?", conv.ID).
-			Order("created_at DESC").
-			First(&lastMessage).Error; err == nil {
-			hasLastMessage = true
+		// Get last message from map (O(1) lookup instead of query)
+		var lastMessageAt *string
+		var lastMessagePreview *string
+
+		if lastMsg, exists := lastMessageMap[conv.ID]; exists {
+			lastMessageAt = new(string)
+			*lastMessageAt = lastMsg.CreatedAt.Format("2006-01-02T15:04:05Z07:00")
+
+			preview := lastMsg.Body
+			if len(preview) > 100 {
+				preview = preview[:100] + "..."
+			}
+			lastMessagePreview = &preview
 		}
 
-		// Get message count
-		var messageCount int64
-		db.Model(&models.Message{}).Where("conversation_id = ?", conv.ID).Count(&messageCount)
+		// Get message count from map (O(1) lookup instead of query)
+		messageCount := messageCountMap[conv.ID]
 
 		// Build conversation number (format: CONV-{ID})
 		conversationNumber := fmt.Sprintf("CONV-%d", conv.ID)
@@ -342,20 +406,6 @@ func (ac AgentController) SearchConversations(req *evo.Request) interface{} {
 			}
 		}
 
-		// Build last message preview
-		var lastMessageAt *string
-		var lastMessagePreview *string
-		if hasLastMessage {
-			lastMessageAt = new(string)
-			*lastMessageAt = lastMessage.CreatedAt.Format("2006-01-02T15:04:05Z07:00")
-
-			preview := lastMessage.Body
-			if len(preview) > 100 {
-				preview = preview[:100] + "..."
-			}
-			lastMessagePreview = &preview
-		}
-
 		conversation := ConversationListItem{
 			ID:                  conv.ID,
 			ConversationNumber:  conversationNumber,
@@ -374,7 +424,7 @@ func (ac AgentController) SearchConversations(req *evo.Request) interface{} {
 				Name:        conv.Client.Name,
 				Email:       email,
 				Phone:       phone,
-				AvatarURL:   nil,
+				AvatarURL:   conv.Client.Avatar,
 				Initials:    initials,
 				ExternalIDs: externalIDs,
 				Language:    conv.Client.Language,
@@ -842,7 +892,7 @@ func (ac AgentController) GetConversationMessages(req *evo.Request) interface{} 
 			if msg.Client != nil {
 				authorID = msg.Client.ID.String()
 				authorName = msg.Client.Name
-				avatarURL = nil // Client doesn't have avatar in current schema
+				avatarURL = msg.Client.Avatar
 			}
 		} else {
 			// System message
@@ -1065,7 +1115,7 @@ func (ac AgentController) GetConversationDetail(req *evo.Request) interface{} {
 			Name:        conv.Client.Name,
 			Email:       email,
 			Phone:       phone,
-			AvatarURL:   nil,
+			AvatarURL:   conv.Client.Avatar,
 			Initials:    initials,
 			ExternalIDs: externalIDs,
 			Language:    conv.Client.Language,
@@ -1146,7 +1196,7 @@ func (ac AgentController) GetConversationDetail(req *evo.Request) interface{} {
 			if msg.Client != nil {
 				authorID = msg.Client.ID.String()
 				authorName = msg.Client.Name
-				avatarURL = nil
+				avatarURL = msg.Client.Avatar
 			}
 		} else {
 			authorType = "system"

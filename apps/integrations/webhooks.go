@@ -137,6 +137,13 @@ func (c WebhookController) TelegramWebhook(request *evo.Request) any {
 		return map[string]string{"ok": "true"}
 	}
 
+	// Parse Telegram config to get bot token
+	var config models.TelegramConfig
+	if err := json.Unmarshal([]byte(integration.Config), &config); err != nil {
+		log.Error("Failed to parse Telegram config:", err)
+		return map[string]string{"ok": "true"}
+	}
+
 	// Get request body
 	body := request.Body()
 
@@ -177,6 +184,16 @@ func (c WebhookController) TelegramWebhook(request *evo.Request) any {
 		}
 		userInfo["name"] = userName
 
+		// Add language code if available
+		if msg.From.LanguageCode != "" {
+			userInfo["language"] = msg.From.LanguageCode
+		}
+
+		// Store telegram user ID and bot token for deferred avatar fetching
+		// Avatar will be fetched in upsertClient only if client hasn't been updated within 24 hours
+		userInfo["telegram_user_id"] = msg.From.ID
+		userInfo["telegram_bot_token"] = config.BotToken
+
 		// Process the message
 		go processIncomingMessage(
 			models.ExternalIDTypeTelegram,
@@ -208,17 +225,105 @@ type TelegramMessage struct {
 
 // TelegramUser represents a Telegram user
 type TelegramUser struct {
-	ID        int64  `json:"id"`
-	IsBot     bool   `json:"is_bot"`
-	FirstName string `json:"first_name"`
-	LastName  string `json:"last_name,omitempty"`
-	Username  string `json:"username,omitempty"`
+	ID           int64  `json:"id"`
+	IsBot        bool   `json:"is_bot"`
+	FirstName    string `json:"first_name"`
+	LastName     string `json:"last_name,omitempty"`
+	Username     string `json:"username,omitempty"`
+	LanguageCode string `json:"language_code,omitempty"`
 }
 
 // TelegramChat represents a Telegram chat
 type TelegramChat struct {
 	ID   int64  `json:"id"`
 	Type string `json:"type"`
+}
+
+// getTelegramUserProfilePhotoURL fetches the user's profile photo URL from Telegram API
+func getTelegramUserProfilePhotoURL(botToken string, userID int64) string {
+	// First, get user profile photos
+	apiURL := fmt.Sprintf("https://api.telegram.org/bot%s/getUserProfilePhotos?user_id=%d&limit=1", botToken, userID)
+
+	resp, err := http.Get(apiURL)
+	if err != nil {
+		log.Warning("Failed to get Telegram user profile photos: %v", err)
+		return ""
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return ""
+	}
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return ""
+	}
+
+	var photosResponse struct {
+		OK     bool `json:"ok"`
+		Result struct {
+			TotalCount int `json:"total_count"`
+			Photos     [][]struct {
+				FileID       string `json:"file_id"`
+				FileUniqueID string `json:"file_unique_id"`
+				Width        int    `json:"width"`
+				Height       int    `json:"height"`
+			} `json:"photos"`
+		} `json:"result"`
+	}
+
+	if err := json.Unmarshal(body, &photosResponse); err != nil {
+		return ""
+	}
+
+	if !photosResponse.OK || photosResponse.Result.TotalCount == 0 || len(photosResponse.Result.Photos) == 0 {
+		return ""
+	}
+
+	// Get the largest photo (last in the array)
+	photos := photosResponse.Result.Photos[0]
+	if len(photos) == 0 {
+		return ""
+	}
+	fileID := photos[len(photos)-1].FileID
+
+	// Get file path
+	fileURL := fmt.Sprintf("https://api.telegram.org/bot%s/getFile?file_id=%s", botToken, fileID)
+	fileResp, err := http.Get(fileURL)
+	if err != nil {
+		return ""
+	}
+	defer fileResp.Body.Close()
+
+	if fileResp.StatusCode != http.StatusOK {
+		return ""
+	}
+
+	fileBody, err := io.ReadAll(fileResp.Body)
+	if err != nil {
+		return ""
+	}
+
+	var fileResponse struct {
+		OK     bool `json:"ok"`
+		Result struct {
+			FileID   string `json:"file_id"`
+			FilePath string `json:"file_path"`
+		} `json:"result"`
+	}
+
+	if err := json.Unmarshal(fileBody, &fileResponse); err != nil {
+		return ""
+	}
+
+	if !fileResponse.OK || fileResponse.Result.FilePath == "" {
+		return ""
+	}
+
+	// Build the direct URL to the photo
+	photoURL := fmt.Sprintf("https://api.telegram.org/file/bot%s/%s", botToken, fileResponse.Result.FilePath)
+	return photoURL
 }
 
 // =============================================================================
@@ -403,6 +508,11 @@ func processIncomingMessage(
 		return
 	}
 
+	// 4. Update conversation status to "wait_for_agent" when customer sends a message
+	if err := db.Model(&conversation).Update("status", models.ConversationStatusWaitForAgent).Error; err != nil {
+		log.Warning("Failed to update conversation status:", err)
+	}
+
 	log.Info("Message created successfully: conversation=%d, message=%d", conversation.ID, message.ID)
 }
 
@@ -427,6 +537,29 @@ func upsertClient(externalIDType, externalIDValue string, userInfo map[string]in
 				updated = true
 			}
 
+			// Only update profile data (language, avatar) if not updated within last 24 hours
+			// This avoids excessive API calls for profile photos
+			if time.Since(client.UpdatedAt) > 24*time.Hour {
+				// Update language if provided and different
+				if language, ok := userInfo["language"].(string); ok && language != "" {
+					if client.Language == nil || *client.Language != language {
+						client.Language = &language
+						updated = true
+					}
+				}
+
+				// Fetch avatar from Telegram if bot token is provided (deferred fetch)
+				if telegramUserID, ok := userInfo["telegram_user_id"].(int64); ok && telegramUserID > 0 {
+					if botToken, ok := userInfo["telegram_bot_token"].(string); ok && botToken != "" {
+						avatarURL := getTelegramUserProfilePhotoURL(botToken, telegramUserID)
+						if avatarURL != "" && (client.Avatar == nil || *client.Avatar != avatarURL) {
+							client.Avatar = &avatarURL
+							updated = true
+						}
+					}
+				}
+			}
+
 			if updated {
 				if err := db.Save(client).Error; err != nil {
 					log.Warning("Failed to update client info:", err)
@@ -439,21 +572,45 @@ func upsertClient(externalIDType, externalIDValue string, userInfo map[string]in
 
 	// Client doesn't exist, create new one
 	clientName := "Unknown"
+	var clientLanguage *string
+	var clientAvatar *string
+
 	if userInfo != nil {
 		if name, ok := userInfo["name"].(string); ok && name != "" {
 			clientName = name
 		}
+		if language, ok := userInfo["language"].(string); ok && language != "" {
+			clientLanguage = &language
+		}
+		// Fetch avatar from Telegram for new clients
+		if telegramUserID, ok := userInfo["telegram_user_id"].(int64); ok && telegramUserID > 0 {
+			if botToken, ok := userInfo["telegram_bot_token"].(string); ok && botToken != "" {
+				avatarURL := getTelegramUserProfilePhotoURL(botToken, telegramUserID)
+				if avatarURL != "" {
+					clientAvatar = &avatarURL
+				}
+			}
+		}
 	}
 
-	// Build client data from userInfo
+	// Build client data from userInfo (exclude language, avatar, and internal fields)
 	var clientData []byte
 	if userInfo != nil {
-		clientData, _ = json.Marshal(userInfo)
+		// Create a copy without language, avatar, and internal telegram fields for the data field
+		dataCopy := make(map[string]interface{})
+		for k, v := range userInfo {
+			if k != "language" && k != "avatar" && k != "telegram_user_id" && k != "telegram_bot_token" {
+				dataCopy[k] = v
+			}
+		}
+		clientData, _ = json.Marshal(dataCopy)
 	}
 
 	client := &models.Client{
-		Name: clientName,
-		Data: clientData,
+		Name:     clientName,
+		Data:     clientData,
+		Language: clientLanguage,
+		Avatar:   clientAvatar,
 	}
 
 	if err := db.Create(client).Error; err != nil {
