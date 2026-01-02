@@ -9,6 +9,7 @@ import (
 	"github.com/iesreza/homa-backend/apps/auth"
 	"github.com/iesreza/homa-backend/apps/bot"
 	"github.com/iesreza/homa-backend/apps/conversation"
+	"github.com/iesreza/homa-backend/apps/integrations"
 	"github.com/iesreza/homa-backend/apps/livechat"
 	"github.com/iesreza/homa-backend/apps/models"
 	"github.com/iesreza/homa-backend/apps/nats"
@@ -23,7 +24,7 @@ func main() {
 	evo.Setup()
 
 	var apps = application.GetInstance()
-	apps.Register(system.App{}, auth.App{}, models.App{}, nats.App{}, storage.App{}, conversation.App{}, agent.App{}, admin.App{}, webhook.App{}, livechat.App{}, swagger.App{}, ai.App{}, bot.App{}, sessions.App{})
+	apps.Register(system.App{}, auth.App{}, models.App{}, nats.App{}, storage.App{}, conversation.App{}, agent.App{}, admin.App{}, webhook.App{}, livechat.App{}, swagger.App{}, ai.App{}, bot.App{}, sessions.App{}, integrations.App{})
 
 	evo.Run()
 }

@@ -108,6 +108,15 @@ func (a App) Router() error {
 	evo.Get("/api/admin/webhook_deliveries", controller.ListWebhookDeliveries)
 	evo.Get("/api/admin/webhook_deliveries/:id", controller.GetWebhookDelivery)
 
+	// Integration management APIs
+	evo.Get("/api/admin/integrations", controller.ListIntegrations)
+	evo.Get("/api/admin/integrations/types", controller.ListIntegrationTypes)
+	evo.Get("/api/admin/integrations/:type", controller.GetIntegration)
+	evo.Get("/api/admin/integrations/:type/fields", controller.GetIntegrationFields)
+	evo.Put("/api/admin/integrations/:type", controller.SaveIntegration)
+	evo.Post("/api/admin/integrations/:type/test", controller.TestIntegration)
+	evo.Delete("/api/admin/integrations/:type", controller.DeleteIntegration)
+
 	return nil
 }
 

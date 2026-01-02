@@ -37,6 +37,9 @@ func (a App) Register() error {
 	// Settings model
 	db.UseModel(Setting{})
 
+	// Integrations model
+	db.UseModel(Integration{})
+
 	// User session tracking models
 	db.UseModel(UserSession{})
 	db.UseModel(UserDailyActivity{})

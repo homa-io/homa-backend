@@ -37,6 +37,13 @@ const (
 	ConversationPriorityUrgent = "urgent"
 )
 
+// Outbound messaging functions - set by the integrations package to avoid circular imports
+var (
+	SendTelegramMessage func(chatID, text string) error
+	SendWhatsAppMessage func(phoneNumber, text string) error
+	SendSlackMessage    func(channelID, text string) error
+)
+
 type Conversation struct {
 	ID           uint           `gorm:"column:id;primaryKey" json:"id"`
 	Title        string         `gorm:"column:title;size:255;not null" json:"title"`
@@ -342,5 +349,79 @@ func (m *Message) AfterCreate(tx *gorm.DB) error {
 		}
 	}()
 
+	// Send outbound message to external channels (Telegram, WhatsApp, etc.)
+	// Only for agent messages (UserID is set, not ClientID)
+	if m.UserID != nil && !m.IsSystemMessage {
+		go m.sendToExternalChannel()
+	}
+
 	return nil
+}
+
+// sendToExternalChannel sends the message to the appropriate external channel
+func (m *Message) sendToExternalChannel() {
+	// Fetch the conversation with client and their external IDs
+	var conversation Conversation
+	if err := db.Preload("Client").Preload("Client.ExternalIDs").First(&conversation, m.ConversationID).Error; err != nil {
+		log.Error("Failed to fetch conversation for outbound message: %v", err)
+		return
+	}
+
+	// Check the channel and send accordingly
+	switch conversation.ChannelID {
+	case "telegram":
+		// Find the Telegram chat ID from the client's external IDs
+		var telegramChatID string
+		for _, extID := range conversation.Client.ExternalIDs {
+			if extID.Type == ExternalIDTypeTelegram {
+				telegramChatID = extID.Value
+				break
+			}
+		}
+		if telegramChatID == "" {
+			log.Warning("No Telegram chat ID found for client %s", conversation.ClientID)
+			return
+		}
+		if err := SendTelegramMessage(telegramChatID, m.Body); err != nil {
+			log.Error("Failed to send Telegram message: %v", err)
+		}
+
+	case "whatsapp":
+		// Find the WhatsApp phone number from the client's external IDs
+		var whatsappPhone string
+		for _, extID := range conversation.Client.ExternalIDs {
+			if extID.Type == ExternalIDTypeWhatsapp {
+				whatsappPhone = extID.Value
+				break
+			}
+		}
+		if whatsappPhone == "" {
+			log.Warning("No WhatsApp phone found for client %s", conversation.ClientID)
+			return
+		}
+		if err := SendWhatsAppMessage(whatsappPhone, m.Body); err != nil {
+			log.Error("Failed to send WhatsApp message: %v", err)
+		}
+
+	case "slack":
+		// Find the Slack user/channel ID from the client's external IDs
+		var slackID string
+		for _, extID := range conversation.Client.ExternalIDs {
+			if extID.Type == ExternalIDTypeSlack {
+				slackID = extID.Value
+				break
+			}
+		}
+		if slackID == "" {
+			log.Warning("No Slack ID found for client %s", conversation.ClientID)
+			return
+		}
+		if err := SendSlackMessage(slackID, m.Body); err != nil {
+			log.Error("Failed to send Slack message: %v", err)
+		}
+
+	default:
+		// For web chat and other channels, no outbound sending needed
+		// The dashboard handles the realtime updates via WebSocket
+	}
 }
