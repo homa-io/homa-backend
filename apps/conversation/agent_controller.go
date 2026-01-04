@@ -128,11 +128,11 @@ func (ac AgentController) SearchConversations(req *evo.Request) interface{} {
 
 	offset := (page - 1) * limit
 
-	// Get authenticated user ID (from JWT token)
-	userID := req.Get("user_id")
+	// Get authenticated user ID from JWT token via User interface
 	userIDStr := ""
-	if userID.String() != "" {
-		userIDStr = userID.String()
+	if !req.User().Anonymous() {
+		user := req.User().Interface().(*auth.User)
+		userIDStr = user.UserID.String()
 	}
 
 	// Build query
@@ -485,16 +485,12 @@ func (ac AgentController) SearchConversations(req *evo.Request) interface{} {
 // @Success 200 {object} map[string]int64
 // @Router /api/agent/conversations/unread-count [get]
 func (ac AgentController) GetUnreadCount(req *evo.Request) interface{} {
-	// Get authenticated user ID
-	userIDStr := req.Get("user_id").String()
-	if userIDStr == "" {
-		return response.Error(response.NewErrorWithDetails(response.ErrorCodeUnauthorized, "Authentication required", 401, "No user ID in request"))
+	// Get authenticated user ID from JWT token
+	if req.User().Anonymous() {
+		return response.Error(response.NewErrorWithDetails(response.ErrorCodeUnauthorized, "Authentication required", 401, "No authenticated user"))
 	}
-
-	userID, err := uuid.Parse(userIDStr)
-	if err != nil {
-		return response.Error(response.NewErrorWithDetails(response.ErrorCodeInvalidInput, "Invalid user ID", 400, err.Error()))
-	}
+	user := req.User().Interface().(*auth.User)
+	userID := user.UserID
 
 	unreadCount := getTotalUnreadCount(userID)
 	return response.OK(map[string]int64{
@@ -512,16 +508,12 @@ func (ac AgentController) GetUnreadCount(req *evo.Request) interface{} {
 // @Success 200 {object} map[string]interface{}
 // @Router /api/agent/conversations/{id}/read [patch]
 func (ac AgentController) MarkConversationRead(req *evo.Request) interface{} {
-	// Get authenticated user ID
-	userIDStr := req.Get("user_id").String()
-	if userIDStr == "" {
-		return response.Error(response.NewErrorWithDetails(response.ErrorCodeUnauthorized, "Authentication required", 401, "No user ID in request"))
+	// Get authenticated user ID from JWT token
+	if req.User().Anonymous() {
+		return response.Error(response.NewErrorWithDetails(response.ErrorCodeUnauthorized, "Authentication required", 401, "No authenticated user"))
 	}
-
-	userID, err := uuid.Parse(userIDStr)
-	if err != nil {
-		return response.Error(response.NewErrorWithDetails(response.ErrorCodeInvalidInput, "Invalid user ID", 400, err.Error()))
-	}
+	user := req.User().Interface().(*auth.User)
+	userID := user.UserID
 
 	// Parse conversation ID
 	conversationID := req.Param("id").Uint()
@@ -979,11 +971,11 @@ func (ac AgentController) GetConversationDetail(req *evo.Request) interface{} {
 		return response.Error(response.NewErrorWithDetails(response.ErrorCodeInvalidInput, "Invalid conversation ID", 400, "Conversation ID must be a positive integer"))
 	}
 
-	// Get authenticated user ID (from JWT token)
-	userID := req.Get("user_id")
+	// Get authenticated user ID from JWT token
 	userIDStr := ""
-	if userID.String() != "" {
-		userIDStr = userID.String()
+	if !req.User().Anonymous() {
+		user := req.User().Interface().(*auth.User)
+		userIDStr = user.UserID.String()
 	}
 
 	// Get conversation with all relations
@@ -1889,24 +1881,11 @@ func (ac AgentController) AddAgentMessage(req *evo.Request) interface{} {
 		return response.Error(response.NewErrorWithDetails(response.ErrorCodeInvalidInput, "Invalid conversation ID", 400, "Conversation ID must be a positive integer"))
 	}
 
-	// Get authenticated agent's user ID
+	// Get authenticated agent's user ID from JWT token
 	var userID uuid.UUID
-	userIDValue := req.Get("user_id")
-	if userIDValue.String() != "" {
-		parsedID, err := uuid.Parse(userIDValue.String())
-		if err == nil {
-			userID = parsedID
-		}
-	}
-
-	// If no user ID from JWT, try to get from request User
-	if userID == uuid.Nil {
-		user := req.User()
-		if user != nil && !user.Anonymous() {
-			if userModel, ok := user.(*auth.User); ok {
-				userID = userModel.UserID
-			}
-		}
+	if !req.User().Anonymous() {
+		user := req.User().Interface().(*auth.User)
+		userID = user.UserID
 	}
 
 	// Verify conversation exists
