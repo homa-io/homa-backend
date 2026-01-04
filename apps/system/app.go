@@ -6,6 +6,7 @@ import (
 	"github.com/getevo/evo/v2/lib/settings"
 	"github.com/getevo/restify"
 	"github.com/gofiber/fiber/v2"
+	"github.com/gofiber/fiber/v2/middleware/cors"
 	"github.com/gofiber/fiber/v2/middleware/limiter"
 	"github.com/gofiber/fiber/v2/middleware/logger"
 	"strings"
@@ -65,6 +66,23 @@ func (a App) Register() error {
 		}))
 		log.Info("Rate limiting enabled: %d requests per minute", RateLimitRequests)
 	}
+
+	// Add CORS middleware for public API endpoints (widget integration)
+	app.Use("/api/client", cors.New(cors.Config{
+		AllowOrigins:     "*",
+		AllowMethods:     "GET,POST,PUT,PATCH,DELETE,OPTIONS",
+		AllowHeaders:     "Origin,Content-Type,Accept,Authorization",
+		AllowCredentials: false,
+		MaxAge:           86400,
+	}))
+
+	// CORS for widget static files
+	app.Use("/widget", cors.New(cors.Config{
+		AllowOrigins: "*",
+		AllowMethods: "GET,OPTIONS",
+		AllowHeaders: "Origin,Content-Type,Accept",
+		MaxAge:       86400,
+	}))
 
 	restify.SetPrefix("/api/restify")
 

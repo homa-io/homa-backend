@@ -18,8 +18,19 @@ func RegisterRoutes() error {
 	// Serve the livechat UI
 	evo.Static("/livechat", "./static/livechat")
 
+	// Serve the chat widget SDK
+	evo.Static("/widget", "./static/widget")
+
 	// Get the Fiber app instance
 	app := evo.GetFiber()
+
+	// Add CORS headers for widget scripts
+	app.Use("/widget", func(c *fiber.Ctx) error {
+		c.Set("Access-Control-Allow-Origin", "*")
+		c.Set("Access-Control-Allow-Methods", "GET")
+		c.Set("Cache-Control", "public, max-age=3600")
+		return c.Next()
+	})
 
 	// WebSocket upgrade middleware
 	app.Use("/ws", func(c *fiber.Ctx) error {
