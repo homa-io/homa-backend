@@ -4,6 +4,7 @@ import (
 	"github.com/getevo/evo/v2"
 	"github.com/getevo/evo/v2/lib/log"
 	"github.com/getevo/evo/v2/lib/settings"
+	"github.com/iesreza/homa-backend/apps/models"
 	natsconn "github.com/iesreza/homa-backend/apps/nats"
 	"github.com/nats-io/nats.go"
 )
@@ -63,6 +64,11 @@ func (a App) Router() error {
 
 // WhenReady is called when the app is ready
 func (a App) WhenReady() error {
+	// Register AI agent message processing function
+	// This avoids circular import between ai and models packages
+	models.ProcessIncomingMessage = ProcessIncomingMessage
+	log.Info("AI agent message processing registered")
+
 	// Subscribe to settings reload events
 	if natsconn.IsConnected() {
 		_, err := natsconn.Subscribe("settings.ai.reload", func(msg *nats.Msg) {

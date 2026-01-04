@@ -117,6 +117,21 @@ func (a App) Router() error {
 	evo.Post("/api/admin/integrations/:type/test", controller.TestIntegration)
 	evo.Delete("/api/admin/integrations/:type", controller.DeleteIntegration)
 
+	// AI Agent management APIs
+	evo.Get("/api/admin/ai-agents", controller.ListAIAgents)
+	evo.Get("/api/admin/ai-agents/:id", controller.GetAIAgent)
+	evo.Post("/api/admin/ai-agents", controller.CreateAIAgent)
+	evo.Put("/api/admin/ai-agents/:id", controller.UpdateAIAgent)
+	evo.Delete("/api/admin/ai-agents/:id", controller.DeleteAIAgent)
+	evo.Get("/api/admin/ai-agents/:id/template", controller.GetAIAgentTemplate)
+
+	// AI Agent Tool management APIs
+	evo.Get("/api/admin/ai-agents/:agent_id/tools", controller.ListAIAgentTools)
+	evo.Get("/api/admin/ai-agents/:agent_id/tools/:tool_id", controller.GetAIAgentTool)
+	evo.Post("/api/admin/ai-agents/:agent_id/tools", controller.CreateAIAgentTool)
+	evo.Put("/api/admin/ai-agents/:agent_id/tools/:tool_id", controller.UpdateAIAgentTool)
+	evo.Delete("/api/admin/ai-agents/:agent_id/tools/:tool_id", controller.DeleteAIAgentTool)
+
 	return nil
 }
 

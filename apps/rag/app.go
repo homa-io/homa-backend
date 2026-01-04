@@ -3,6 +3,7 @@ package rag
 import (
 	"github.com/getevo/evo/v2"
 	"github.com/getevo/evo/v2/lib/log"
+	"github.com/iesreza/homa-backend/apps/ai"
 	"github.com/iesreza/homa-backend/apps/models"
 	natsconn "github.com/iesreza/homa-backend/apps/nats"
 	"github.com/nats-io/nats.go"
@@ -88,6 +89,11 @@ func (a App) Router() error {
 
 // WhenReady is called when the app is ready
 func (a App) WhenReady() error {
+	// Register knowledge base search function for AI agents
+	// This avoids circular import between rag and ai packages
+	ai.SearchKnowledgeBase = SearchWithContext
+	log.Info("Knowledge base search registered for AI agents")
+
 	// Subscribe to settings reload events
 	if natsconn.IsConnected() {
 		_, err := natsconn.Subscribe("settings.rag.reload", func(msg *nats.Msg) {

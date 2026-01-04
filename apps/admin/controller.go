@@ -11,11 +11,13 @@ import (
 	"github.com/getevo/evo/v2/lib/settings"
 	"github.com/getevo/pagination"
 	"github.com/google/uuid"
+	"github.com/iesreza/homa-backend/apps/ai"
 	"github.com/iesreza/homa-backend/apps/auth"
 	integrationsDriver "github.com/iesreza/homa-backend/apps/integrations"
 	"github.com/iesreza/homa-backend/apps/models"
 	"github.com/iesreza/homa-backend/lib/imageutil"
 	"github.com/iesreza/homa-backend/lib/response"
+	"gorm.io/datatypes"
 	"gorm.io/gorm"
 )
 
@@ -627,7 +629,8 @@ func (c Controller) CreateDepartment(request *evo.Request) any {
 	var req struct {
 		Name        string   `json:"name" validate:"required,min=1,max=255"`
 		Description string   `json:"description"`
-		UserIDs     []string `json:"user_ids"` // UUIDs of users to assign
+		UserIDs     []string `json:"user_ids"`    // UUIDs of users to assign
+		AIAgentID   *uint    `json:"ai_agent_id"` // AI Agent to assign (nullable)
 	}
 
 	if err := request.BodyParser(&req); err != nil {
@@ -638,6 +641,7 @@ func (c Controller) CreateDepartment(request *evo.Request) any {
 		Name:        req.Name,
 		Description: req.Description,
 		Status:      models.DepartmentStatusActive,
+		AIAgentID:   req.AIAgentID,
 	}
 
 	// Use transaction for creating department and assigning users
@@ -676,8 +680,8 @@ func (c Controller) CreateDepartment(request *evo.Request) any {
 
 	tx.Commit()
 
-	// Reload with users
-	db.Preload("Users").First(&department, department.ID)
+	// Reload with users and AI agent
+	db.Preload("Users").Preload("AIAgent").First(&department, department.ID)
 
 	return response.Created(department)
 }
@@ -692,8 +696,9 @@ func (c Controller) EditDepartment(request *evo.Request) any {
 	var req struct {
 		Name        string   `json:"name" validate:"required,min=1,max=255"`
 		Description string   `json:"description"`
-		Status      string   `json:"status"` // active, suspended
-		UserIDs     []string `json:"user_ids"` // UUIDs of users to assign (replaces existing)
+		Status      string   `json:"status"`      // active, suspended
+		UserIDs     []string `json:"user_ids"`    // UUIDs of users to assign (replaces existing)
+		AIAgentID   *uint    `json:"ai_agent_id"` // AI Agent to assign (nullable)
 	}
 
 	if err := request.BodyParser(&req); err != nil {
@@ -716,6 +721,7 @@ func (c Controller) EditDepartment(request *evo.Request) any {
 	updates := map[string]interface{}{
 		"name":        req.Name,
 		"description": req.Description,
+		"ai_agent_id": req.AIAgentID,
 	}
 	if req.Status != "" && (req.Status == models.DepartmentStatusActive || req.Status == models.DepartmentStatusSuspended) {
 		updates["status"] = req.Status
@@ -764,8 +770,8 @@ func (c Controller) EditDepartment(request *evo.Request) any {
 		return response.Error(response.ErrInternalError)
 	}
 
-	// Reload with users
-	db.Preload("Users").First(&department, departmentID)
+	// Reload with users and AI agent
+	db.Preload("Users").Preload("AIAgent").First(&department, departmentID)
 
 	return response.OK(department)
 }
@@ -800,7 +806,7 @@ func (c Controller) SoftDeleteDepartment(request *evo.Request) any {
 // ListDepartments returns paginated list of departments with search
 func (c Controller) ListDepartments(request *evo.Request) any {
 	var departments []models.Department
-	query := db.Model(&models.Department{}).Preload("Users")
+	query := db.Model(&models.Department{}).Preload("Users").Preload("AIAgent")
 
 	// Search functionality
 	search := request.Query("search").String()
@@ -847,7 +853,7 @@ func (c Controller) GetDepartment(request *evo.Request) any {
 	}
 
 	var department models.Department
-	err := db.Preload("Users").First(&department, departmentID).Error
+	err := db.Preload("Users").Preload("AIAgent").First(&department, departmentID).Error
 	if err != nil {
 		if err == gorm.ErrRecordNotFound {
 			notFoundErr := response.NewError(response.ErrorCodeNotFound, "Department not found", 404)
@@ -1152,7 +1158,7 @@ func (c Controller) UploadAvatar(request *evo.Request) any {
 // ListUsers returns paginated list of users with search and filtering
 func (c Controller) ListUsers(request *evo.Request) any {
 	var users []auth.User
-	query := db.Model(&auth.User{}).Select("id, name, last_name, display_name, email, type, avatar, created_at, updated_at")
+	query := db.Model(&auth.User{}).Select("id, name, last_name, display_name, email, type, status, avatar, created_at, updated_at")
 
 	// Search functionality
 	search := request.Query("search").String()
@@ -1166,6 +1172,11 @@ func (c Controller) ListUsers(request *evo.Request) any {
 	// Filter by type
 	if userType := request.Query("type").String(); userType != "" {
 		query = query.Where("type = ?", userType)
+	}
+
+	// Filter by status
+	if status := request.Query("status").String(); status != "" {
+		query = query.Where("status = ?", status)
 	}
 
 	// Order by
@@ -1188,11 +1199,13 @@ func (c Controller) ListUsers(request *evo.Request) any {
 		return response.Error(response.ErrInternalError)
 	}
 
-	return response.OKWithMeta(users, &response.Meta{
-		Page:       p.CurrentPage,
-		Limit:      p.Size,
-		Total:      int64(p.Records),
-		TotalPages: p.Pages,
+	// Return in format expected by frontend: { users: [...], total: N, page: N, ... }
+	return response.OK(map[string]interface{}{
+		"users":       users,
+		"total":       p.Records,
+		"page":        p.CurrentPage,
+		"page_size":   p.Size,
+		"total_pages": p.Pages,
 	})
 }
 
@@ -2791,4 +2804,374 @@ func getWebhookBaseURL(request *evo.Request) string {
 	}
 
 	return proto + "://" + host
+}
+
+// ListAIAgents returns all AI agents
+func (c Controller) ListAIAgents(request *evo.Request) any {
+	var agents []models.AIAgent
+
+	query := db.Order("id DESC")
+
+	// Filter by status if provided
+	if status := request.Query("status").String(); status != "" {
+		query = query.Where("status = ?", status)
+	}
+
+	// Preload relationships
+	query = query.Preload("Bot").Preload("HandoverUser")
+
+	err := query.Find(&agents).Error
+	if err != nil {
+		return response.Error(response.ErrInternalError)
+	}
+
+	return response.OK(agents)
+}
+
+// GetAIAgent returns a single AI agent by ID
+func (c Controller) GetAIAgent(request *evo.Request) any {
+	id := request.Param("id").String()
+	var agent models.AIAgent
+
+	err := db.Preload("Bot").Preload("HandoverUser").First(&agent, id).Error
+	if err != nil {
+		if err == gorm.ErrRecordNotFound {
+			return response.NotFound(request, "AI Agent not found")
+		}
+		return response.Error(response.ErrInternalError)
+	}
+
+	return response.OK(agent)
+}
+
+// CreateAIAgent creates a new AI agent
+func (c Controller) CreateAIAgent(request *evo.Request) any {
+	var agent models.AIAgent
+
+	if err := request.BodyParser(&agent); err != nil {
+		return response.BadRequest(request, "Invalid request body")
+	}
+
+	// Validate required fields
+	if agent.Name == "" {
+		return response.BadRequest(request, "Name is required")
+	}
+	if agent.BotID == "" {
+		return response.BadRequest(request, "Bot ID is required")
+	}
+
+	// Validate tone
+	validTones := []string{
+		models.AIAgentToneFormal,
+		models.AIAgentToneCasual,
+		models.AIAgentToneDetailed,
+		models.AIAgentTonePrecise,
+		models.AIAgentToneEmpathetic,
+		models.AIAgentToneTechnical,
+	}
+	toneValid := false
+	for _, t := range validTones {
+		if agent.Tone == t {
+			toneValid = true
+			break
+		}
+	}
+	if !toneValid {
+		return response.BadRequest(request, "Invalid tone value")
+	}
+
+	// Create the agent
+	err := db.Create(&agent).Error
+	if err != nil {
+		return response.Error(response.ErrInternalError)
+	}
+
+	// Reload with relationships
+	db.Preload("Bot").Preload("HandoverUser").First(&agent, agent.ID)
+
+	return response.OK(agent)
+}
+
+// UpdateAIAgent updates an existing AI agent
+func (c Controller) UpdateAIAgent(request *evo.Request) any {
+	id := request.Param("id").String()
+
+	var agent models.AIAgent
+	err := db.First(&agent, id).Error
+	if err != nil {
+		if err == gorm.ErrRecordNotFound {
+			return response.NotFound(request, "AI Agent not found")
+		}
+		return response.Error(response.ErrInternalError)
+	}
+
+	// Parse update data
+	var updateData map[string]any
+	if err := request.BodyParser(&updateData); err != nil {
+		return response.BadRequest(request, "Invalid request body")
+	}
+
+	// Validate tone if it's being updated
+	if tone, ok := updateData["tone"].(string); ok {
+		validTones := []string{
+			models.AIAgentToneFormal,
+			models.AIAgentToneCasual,
+			models.AIAgentToneDetailed,
+			models.AIAgentTonePrecise,
+			models.AIAgentToneEmpathetic,
+			models.AIAgentToneTechnical,
+		}
+		toneValid := false
+		for _, t := range validTones {
+			if tone == t {
+				toneValid = true
+				break
+			}
+		}
+		if !toneValid {
+			return response.BadRequest(request, "Invalid tone value")
+		}
+	}
+
+	// Convert handover_user_ids array to JSON if present
+	if userIds, ok := updateData["handover_user_ids"]; ok {
+		jsonBytes, err := json.Marshal(userIds)
+		if err != nil {
+			return response.BadRequest(request, "Invalid handover_user_ids format")
+		}
+		updateData["handover_user_ids"] = datatypes.JSON(jsonBytes)
+	}
+
+	// Update the agent
+	err = db.Model(&agent).Updates(updateData).Error
+	if err != nil {
+		return response.Error(response.ErrInternalError)
+	}
+
+	// Reload with relationships
+	db.Preload("Bot").Preload("HandoverUser").First(&agent, id)
+
+	return response.OK(agent)
+}
+
+// DeleteAIAgent deletes an AI agent
+func (c Controller) DeleteAIAgent(request *evo.Request) any {
+	id := request.Param("id").String()
+
+	var agent models.AIAgent
+	err := db.First(&agent, id).Error
+	if err != nil {
+		if err == gorm.ErrRecordNotFound {
+			return response.NotFound(request, "AI Agent not found")
+		}
+		return response.Error(response.ErrInternalError)
+	}
+
+	// Check if agent is being used by any departments
+	var count int64
+	db.Model(&models.Department{}).Where("ai_agent_id = ?", id).Count(&count)
+	if count > 0 {
+		return response.BadRequest(request, "Cannot delete AI agent that is assigned to departments")
+	}
+
+	// Delete the agent
+	err = db.Delete(&agent).Error
+	if err != nil {
+		return response.Error(response.ErrInternalError)
+	}
+
+	return response.OK(map[string]string{"message": "AI Agent deleted successfully"})
+}
+
+// GetAIAgentTemplate generates and returns the system prompt template for an AI agent
+func (c Controller) GetAIAgentTemplate(request *evo.Request) any {
+	id := request.Param("id").String()
+
+	// Load agent with relationships
+	var agent models.AIAgent
+	err := db.Preload("Bot").Preload("HandoverUser").First(&agent, id).Error
+	if err != nil {
+		if err == gorm.ErrRecordNotFound {
+			return response.NotFound(request, "AI Agent not found")
+		}
+		return response.Error(response.ErrInternalError)
+	}
+
+	// Load agent tools
+	var tools []models.AIAgentTool
+	db.Where("ai_agent_id = ?", id).Order("id ASC").Find(&tools)
+
+	// Get project name from settings
+	projectName := models.GetSettingValue("general.project_name", "Your Project")
+
+	// Load knowledge base articles (just titles) if knowledge base is enabled
+	var kbItems []ai.KnowledgeBaseItem
+	if agent.UseKnowledgeBase {
+		var articles []models.KnowledgeBaseArticle
+		db.Select("id, title").Where("status = ?", "published").Find(&articles)
+		for _, a := range articles {
+			kbItems = append(kbItems, ai.KnowledgeBaseItem{
+				ID:    a.ID.String(),
+				Title: a.Title,
+			})
+		}
+	}
+
+	// Generate the template
+	template := ai.GenerateAgentTemplate(ai.TemplateContext{
+		ProjectName:        projectName,
+		Agent:              &agent,
+		Tools:              tools,
+		KnowledgeBaseItems: kbItems,
+	})
+
+	return response.OK(map[string]any{
+		"template":    template,
+		"token_count": len(template) / 4, // Approximate token count
+	})
+}
+
+// ==================== AI Agent Tools ====================
+
+// ListAIAgentTools returns all tools for an AI agent
+func (c Controller) ListAIAgentTools(request *evo.Request) any {
+	agentID := request.Param("agent_id").String()
+
+	// Verify agent exists
+	var agent models.AIAgent
+	if err := db.First(&agent, agentID).Error; err != nil {
+		if err == gorm.ErrRecordNotFound {
+			return response.NotFound(request, "AI Agent not found")
+		}
+		return response.Error(response.ErrInternalError)
+	}
+
+	var tools []models.AIAgentTool
+	err := db.Where("ai_agent_id = ?", agentID).Order("id ASC").Find(&tools).Error
+	if err != nil {
+		return response.Error(response.ErrInternalError)
+	}
+
+	return response.OK(tools)
+}
+
+// GetAIAgentTool returns a single tool by ID
+func (c Controller) GetAIAgentTool(request *evo.Request) any {
+	toolID := request.Param("tool_id").String()
+
+	var tool models.AIAgentTool
+	err := db.First(&tool, toolID).Error
+	if err != nil {
+		if err == gorm.ErrRecordNotFound {
+			return response.NotFound(request, "Tool not found")
+		}
+		return response.Error(response.ErrInternalError)
+	}
+
+	return response.OK(tool)
+}
+
+// CreateAIAgentTool creates a new tool for an AI agent
+func (c Controller) CreateAIAgentTool(request *evo.Request) any {
+	agentID := request.Param("agent_id").String()
+
+	// Verify agent exists
+	var agent models.AIAgent
+	if err := db.First(&agent, agentID).Error; err != nil {
+		if err == gorm.ErrRecordNotFound {
+			return response.NotFound(request, "AI Agent not found")
+		}
+		return response.Error(response.ErrInternalError)
+	}
+
+	var tool models.AIAgentTool
+	if err := request.BodyParser(&tool); err != nil {
+		return response.BadRequest(request, "Invalid request body")
+	}
+
+	// Set the agent ID
+	tool.AIAgentID = agent.ID
+
+	// Validate required fields
+	if tool.Name == "" {
+		return response.BadRequest(request, "Tool name is required")
+	}
+	if tool.Endpoint == "" {
+		return response.BadRequest(request, "Endpoint is required")
+	}
+
+	// Validate method
+	validMethods := []string{models.ToolMethodGET, models.ToolMethodPOST, models.ToolMethodPUT, models.ToolMethodPATCH, models.ToolMethodDELETE}
+	methodValid := false
+	for _, m := range validMethods {
+		if tool.Method == m {
+			methodValid = true
+			break
+		}
+	}
+	if !methodValid {
+		tool.Method = models.ToolMethodGET
+	}
+
+	// Set default auth type if not provided
+	if tool.AuthorizationType == "" {
+		tool.AuthorizationType = models.ToolAuthTypeNone
+	}
+
+	// Create the tool
+	err := db.Create(&tool).Error
+	if err != nil {
+		return response.Error(response.ErrInternalError)
+	}
+
+	return response.OK(tool)
+}
+
+// UpdateAIAgentTool updates an existing tool
+func (c Controller) UpdateAIAgentTool(request *evo.Request) any {
+	toolID := request.Param("tool_id").String()
+
+	var tool models.AIAgentTool
+	err := db.First(&tool, toolID).Error
+	if err != nil {
+		if err == gorm.ErrRecordNotFound {
+			return response.NotFound(request, "Tool not found")
+		}
+		return response.Error(response.ErrInternalError)
+	}
+
+	// Parse update data into the tool struct directly
+	if err := request.BodyParser(&tool); err != nil {
+		return response.BadRequest(request, "Invalid request body")
+	}
+
+	// Save all fields
+	err = db.Save(&tool).Error
+	if err != nil {
+		return response.Error(response.ErrInternalError)
+	}
+
+	return response.OK(tool)
+}
+
+// DeleteAIAgentTool deletes a tool
+func (c Controller) DeleteAIAgentTool(request *evo.Request) any {
+	toolID := request.Param("tool_id").String()
+
+	var tool models.AIAgentTool
+	err := db.First(&tool, toolID).Error
+	if err != nil {
+		if err == gorm.ErrRecordNotFound {
+			return response.NotFound(request, "Tool not found")
+		}
+		return response.Error(response.ErrInternalError)
+	}
+
+	// Delete the tool
+	err = db.Delete(&tool).Error
+	if err != nil {
+		return response.Error(response.ErrInternalError)
+	}
+
+	return response.OK(map[string]string{"message": "Tool deleted successfully"})
 }

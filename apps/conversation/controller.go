@@ -573,6 +573,7 @@ func (c Controller) GetConversationDetail(req *evo.Request) interface{} {
 	}
 
 	// Get pagination parameters with defaults
+	// Default to showing all messages (high limit) for conversation detail view
 	page := req.Query("page").Int()
 	if page < 1 {
 		page = 1
@@ -580,10 +581,10 @@ func (c Controller) GetConversationDetail(req *evo.Request) interface{} {
 
 	pageSize := req.Query("page_size").Int()
 	if pageSize < 1 {
-		pageSize = 20
+		pageSize = 1000 // Default to showing all messages
 	}
-	if pageSize > 100 {
-		pageSize = 100
+	if pageSize > 1000 {
+		pageSize = 1000
 	}
 
 	// Calculate offset

@@ -44,6 +44,9 @@ var (
 	SendSlackMessage    func(channelID, text string) error
 )
 
+// AI Agent processing function - set by the ai package to avoid circular imports
+var ProcessIncomingMessage func(message *Message) error
+
 type Conversation struct {
 	ID           uint           `gorm:"column:id;primaryKey" json:"id"`
 	Title        string         `gorm:"column:title;size:255;not null" json:"title"`
@@ -353,6 +356,18 @@ func (m *Message) AfterCreate(tx *gorm.DB) error {
 	// Only for agent messages (UserID is set, not ClientID)
 	if m.UserID != nil && !m.IsSystemMessage {
 		go m.sendToExternalChannel()
+	}
+
+	// Process incoming customer messages with AI agent
+	// Only for customer messages (ClientID is set, not UserID)
+	if m.ClientID != nil && m.UserID == nil && !m.IsSystemMessage {
+		if ProcessIncomingMessage != nil {
+			go func() {
+				if err := ProcessIncomingMessage(m); err != nil {
+					log.Error("AI agent processing failed for message %d: %v", m.ID, err)
+				}
+			}()
+		}
 	}
 
 	return nil

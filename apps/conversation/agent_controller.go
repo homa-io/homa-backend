@@ -1132,16 +1132,17 @@ func (ac AgentController) GetConversationDetail(req *evo.Request) interface{} {
 	}
 
 	// Get pagination parameters for messages
+	// Default to showing all messages for conversation detail view
 	page := req.Query("page").Int()
 	if page < 1 {
 		page = 1
 	}
 	limit := req.Query("limit").Int()
 	if limit < 1 {
-		limit = 50
+		limit = 1000 // Default to showing all messages
 	}
-	if limit > 100 {
-		limit = 100
+	if limit > 1000 {
+		limit = 1000
 	}
 	offset := (page - 1) * limit
 

@@ -12,6 +12,8 @@ func (a App) Register() error {
 	db.UseModel(Client{})
 	db.UseModel(ClientExternalID{})
 	db.UseModel(Department{})
+	db.UseModel(AIAgent{})
+	db.UseModel(AIAgentTool{})
 	db.UseModel(Channel{})
 	db.UseModel(Conversation{})
 	db.UseModel(Message{})
