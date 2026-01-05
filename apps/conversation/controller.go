@@ -2,6 +2,7 @@ package conversation
 
 import (
 	"strconv"
+	"strings"
 
 	"github.com/getevo/evo/v2"
 	"github.com/getevo/evo/v2/lib/db"
@@ -13,14 +14,31 @@ import (
 
 type Controller struct{}
 
+// getRealIP extracts the real client IP from request headers
+func getRealIP(request *evo.Request) string {
+	// First try X-Real-IP (set by nginx)
+	if realIP := request.Header("X-Real-IP"); realIP != "" {
+		return realIP
+	}
+	// Then try the first IP from X-Forwarded-For
+	if forwardedFor := request.Header("X-Forwarded-For"); forwardedFor != "" {
+		if idx := strings.Index(forwardedFor, ","); idx > 0 {
+			return strings.TrimSpace(forwardedFor[:idx])
+		}
+		return strings.TrimSpace(forwardedFor)
+	}
+	// Fallback to request.IP()
+	return request.IP()
+}
+
 // CreateConversationRequest represents the request structure for creating a conversation
 type CreateConversationRequest struct {
 	// Conversation fields
-	Title        string         `json:"title" validate:"required,min=1,max=255" example:"Login Issue - Cannot access account"`
+	Title        string         `json:"title" example:"Login Issue - Cannot access account"`                              // Optional - defaults to "New Conversation" for widget
 	DepartmentID *uint          `json:"department_id" example:"1"`
 	ExternalID   *string        `json:"external_id" example:"EXT-123"`
-	Status       string         `json:"status" validate:"required,oneof=new wait_for_agent in_progress wait_for_user on_hold resolved closed unresolved spam" example:"new"`
-	Priority     string         `json:"priority" validate:"required,oneof=low medium high urgent" example:"medium"`
+	Status       string         `json:"status" example:"new"`                                                             // Optional - defaults to "new" for widget
+	Priority     string         `json:"priority" example:"medium"`                                                        // Optional - defaults to "medium" for widget
 	Parameters   map[string]any `json:"parameters" swaggertype:"object" example:"issue_type:technical,urgency_level:2"` // Custom attributes for conversation
 
 	// Client fields (for creating new clients)
@@ -91,6 +109,17 @@ func (c Controller) CreateConversation(req *evo.Request) interface{} {
 		return response.Error(response.NewErrorWithDetails(response.ErrorCodeInvalidInput, "Invalid request format", 400, err.Error()))
 	}
 
+	// Set defaults for widget-created conversations
+	if input.Title == "" {
+		input.Title = "New Conversation"
+	}
+	if input.Status == "" {
+		input.Status = "new"
+	}
+	if input.Priority == "" {
+		input.Priority = "medium"
+	}
+
 	// Handle client creation or lookup
 	var clientID uuid.UUID
 	var err error
@@ -132,17 +161,37 @@ func (c Controller) CreateConversation(req *evo.Request) interface{} {
 		return response.Error(missingClientErr)
 	}
 
+	// Extract client IP
+	clientIP := getRealIP(req)
+
+	// Parse user agent from parameters if provided
+	var browser, operatingSystem *string
+	if input.Parameters != nil {
+		if userAgent, ok := input.Parameters["user_agent"].(string); ok && userAgent != "" {
+			uaInfo := ParseUserAgent(userAgent)
+			if b := uaInfo.GetBrowserString(); b != "" {
+				browser = &b
+			}
+			if os := uaInfo.GetOSString(); os != "" {
+				operatingSystem = &os
+			}
+		}
+	}
+
 	// Create conversation input (hardcode channel_id as "web" for web interface)
 	conversationInput := ConversationInput{
-		Title:        input.Title,
-		ClientID:     clientID,
-		DepartmentID: input.DepartmentID,
-		ChannelID:    "web",
-		ExternalID:   input.ExternalID,
-		Status:       input.Status,
-		Priority:     input.Priority,
-		Parameters:   input.Parameters,
-		Message:      input.Message,
+		Title:           input.Title,
+		ClientID:        clientID,
+		DepartmentID:    input.DepartmentID,
+		ChannelID:       "web",
+		ExternalID:      input.ExternalID,
+		Status:          input.Status,
+		Priority:        input.Priority,
+		Parameters:      input.Parameters,
+		Message:         input.Message,
+		IP:              &clientIP,
+		Browser:         browser,
+		OperatingSystem: operatingSystem,
 	}
 
 	// Create the conversation using the business logic function

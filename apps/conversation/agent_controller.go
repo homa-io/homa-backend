@@ -19,6 +19,18 @@ import (
 
 type AgentController struct{}
 
+// parseJSONToMap converts datatypes.JSON to map[string]interface{}
+func parseJSONToMap(data datatypes.JSON) map[string]interface{} {
+	if data == nil || len(data) == 0 {
+		return nil
+	}
+	var result map[string]interface{}
+	if err := json.Unmarshal(data, &result); err != nil {
+		return nil
+	}
+	return result
+}
+
 // ConversationListItem represents a conversation in the list view
 type ConversationListItem struct {
 	ID                   uint                    `json:"id"`
@@ -42,6 +54,7 @@ type ConversationListItem struct {
 	IP                   *string                 `json:"ip"`
 	Browser              *string                 `json:"browser"`
 	OperatingSystem      *string                 `json:"operating_system"`
+	Data                 map[string]interface{}  `json:"data,omitempty"`
 }
 
 type ExternalIDInfo struct {
@@ -51,15 +64,16 @@ type ExternalIDInfo struct {
 }
 
 type CustomerInfo struct {
-	ID          string           `json:"id"`
-	Name        string           `json:"name"`
-	Email       string           `json:"email"`
-	Phone       *string          `json:"phone"`
-	AvatarURL   *string          `json:"avatar_url"`
-	Initials    string           `json:"initials"`
-	ExternalIDs []ExternalIDInfo `json:"external_ids"`
-	Language    *string          `json:"language"`
-	Timezone    *string          `json:"timezone"`
+	ID          string                 `json:"id"`
+	Name        string                 `json:"name"`
+	Email       string                 `json:"email"`
+	Phone       *string                `json:"phone"`
+	AvatarURL   *string                `json:"avatar_url"`
+	Initials    string                 `json:"initials"`
+	ExternalIDs []ExternalIDInfo       `json:"external_ids"`
+	Language    *string                `json:"language"`
+	Timezone    *string                `json:"timezone"`
+	Data        map[string]interface{} `json:"data,omitempty"`
 }
 
 type AgentInfo struct {
@@ -429,6 +443,7 @@ func (ac AgentController) SearchConversations(req *evo.Request) interface{} {
 				ExternalIDs: externalIDs,
 				Language:    conv.Client.Language,
 				Timezone:    conv.Client.Timezone,
+				Data:        parseJSONToMap(conv.Client.Data),
 			},
 			AssignedAgents:  assignedAgents,
 			Department:      department,
@@ -438,6 +453,7 @@ func (ac AgentController) SearchConversations(req *evo.Request) interface{} {
 			IP:              conv.IP,
 			Browser:         conv.Browser,
 			OperatingSystem: conv.OperatingSystem,
+			Data:            parseJSONToMap(conv.CustomFields),
 		}
 
 		// Set unread count if user is authenticated
@@ -1112,6 +1128,7 @@ func (ac AgentController) GetConversationDetail(req *evo.Request) interface{} {
 			ExternalIDs: externalIDs,
 			Language:    conv.Client.Language,
 			Timezone:    conv.Client.Timezone,
+			Data:        parseJSONToMap(conv.Client.Data),
 		},
 		AssignedAgents:  assignedAgents,
 		Department:      department,
@@ -1121,6 +1138,7 @@ func (ac AgentController) GetConversationDetail(req *evo.Request) interface{} {
 		IP:              conv.IP,
 		Browser:         conv.Browser,
 		OperatingSystem: conv.OperatingSystem,
+		Data:            parseJSONToMap(conv.CustomFields),
 	}
 
 	// Get pagination parameters for messages

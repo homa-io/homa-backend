@@ -20,15 +20,18 @@ import (
 
 // ConversationInput represents the input structure for creating or updating conversations
 type ConversationInput struct {
-	Title        string         `json:"title" validate:"required,min=1,max=255"`
-	ClientID     uuid.UUID      `json:"client_id" validate:"required"`
-	DepartmentID *uint          `json:"department_id"`
-	ChannelID    string         `json:"channel_id" validate:"required"`
-	ExternalID   *string        `json:"external_id"`
-	Status       string         `json:"status" validate:"required,oneof=new wait_for_agent in_progress wait_for_user on_hold resolved closed unresolved spam"`
-	Priority     string         `json:"priority" validate:"required,oneof=low medium high urgent"`
-	Parameters   map[string]any `json:"parameters"` // Custom attributes
-	Message      *string        `json:"message"`    // Optional initial message
+	Title           string         `json:"title" validate:"min=1,max=255"`
+	ClientID        uuid.UUID      `json:"client_id" validate:"required"`
+	DepartmentID    *uint          `json:"department_id"`
+	ChannelID       string         `json:"channel_id" validate:"required"`
+	ExternalID      *string        `json:"external_id"`
+	Status          string         `json:"status" validate:"oneof=new wait_for_agent in_progress wait_for_user on_hold resolved closed unresolved spam"`
+	Priority        string         `json:"priority" validate:"oneof=low medium high urgent"`
+	Parameters      map[string]any `json:"parameters"` // Custom attributes
+	Message         *string        `json:"message"`    // Optional initial message
+	IP              *string        `json:"ip"`         // Client IP address
+	Browser         *string        `json:"browser"`    // Browser name and version
+	OperatingSystem *string        `json:"operating_system"` // OS name and version
 }
 
 // ClientInput represents the input structure for creating or updating clients
@@ -69,15 +72,18 @@ func CreateConversation(input ConversationInput) (*models.Conversation, string, 
 
 	// Create conversation
 	conversation := models.Conversation{
-		Title:        input.Title,
-		ClientID:     input.ClientID,
-		DepartmentID: input.DepartmentID,
-		ChannelID:    input.ChannelID,
-		ExternalID:   input.ExternalID,
-		Secret:       secret,
-		Status:       input.Status,
-		Priority:     input.Priority,
-		CustomFields: customFields,
+		Title:           input.Title,
+		ClientID:        input.ClientID,
+		DepartmentID:    input.DepartmentID,
+		ChannelID:       input.ChannelID,
+		ExternalID:      input.ExternalID,
+		Secret:          secret,
+		Status:          input.Status,
+		Priority:        input.Priority,
+		CustomFields:    customFields,
+		IP:              input.IP,
+		Browser:         input.Browser,
+		OperatingSystem: input.OperatingSystem,
 	}
 
 	// Save to database
@@ -305,10 +311,13 @@ func processCustomAttributes(scope string, parameters map[string]any) (datatypes
 	for key, value := range parameters {
 		attr, exists := attrMap[key]
 		if !exists {
-			return nil, fmt.Errorf("unknown custom attribute: %s", key)
+			// Allow arbitrary custom attributes as strings (for flexible widget integration)
+			// Unknown attributes are stored as-is without strict type validation
+			result[key] = value
+			continue
 		}
 
-		// Cast and validate value according to data type
+		// Cast and validate value according to data type for known attributes
 		castedValue, err := castAndValidateValue(attr, value)
 		if err != nil {
 			return nil, fmt.Errorf("invalid value for attribute %s: %w", key, err)
