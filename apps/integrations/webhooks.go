@@ -2,6 +2,7 @@ package integrations
 
 import (
 	"bytes"
+	"context"
 	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
@@ -10,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -19,6 +21,7 @@ import (
 	"github.com/getevo/evo/v2/lib/log"
 	"github.com/google/uuid"
 	"github.com/iesreza/homa-backend/apps/models"
+	"github.com/iesreza/homa-backend/apps/storage"
 )
 
 // WebhookController handles incoming webhooks from integrations
@@ -239,7 +242,8 @@ type TelegramChat struct {
 	Type string `json:"type"`
 }
 
-// getTelegramUserProfilePhotoURL fetches the user's profile photo URL from Telegram API
+// getTelegramUserProfilePhotoURL fetches the user's profile photo from Telegram API,
+// downloads it, stores it in S3, and returns the S3 key (not the expiring Telegram URL)
 func getTelegramUserProfilePhotoURL(botToken string, userID int64) string {
 	// First, get user profile photos
 	apiURL := fmt.Sprintf("https://api.telegram.org/bot%s/getUserProfilePhotos?user_id=%d&limit=1", botToken, userID)
@@ -286,9 +290,11 @@ func getTelegramUserProfilePhotoURL(botToken string, userID int64) string {
 	if len(photos) == 0 {
 		return ""
 	}
-	fileID := photos[len(photos)-1].FileID
+	largestPhoto := photos[len(photos)-1]
+	fileID := largestPhoto.FileID
+	fileUniqueID := largestPhoto.FileUniqueID
 
-	// Get file path
+	// Get file path from Telegram
 	fileURL := fmt.Sprintf("https://api.telegram.org/bot%s/getFile?file_id=%s", botToken, fileID)
 	fileResp, err := http.Get(fileURL)
 	if err != nil {
@@ -321,8 +327,58 @@ func getTelegramUserProfilePhotoURL(botToken string, userID int64) string {
 		return ""
 	}
 
-	// Build the direct URL to the photo
+	// Download the actual image from Telegram
 	photoURL := fmt.Sprintf("https://api.telegram.org/file/bot%s/%s", botToken, fileResponse.Result.FilePath)
+	imgResp, err := http.Get(photoURL)
+	if err != nil {
+		log.Warning("Failed to download Telegram avatar: %v", err)
+		return ""
+	}
+	defer imgResp.Body.Close()
+
+	if imgResp.StatusCode != http.StatusOK {
+		log.Warning("Failed to download Telegram avatar: status %d", imgResp.StatusCode)
+		return ""
+	}
+
+	imgData, err := io.ReadAll(imgResp.Body)
+	if err != nil {
+		log.Warning("Failed to read Telegram avatar data: %v", err)
+		return ""
+	}
+
+	// Determine file extension from the file path
+	ext := filepath.Ext(fileResponse.Result.FilePath)
+	if ext == "" {
+		ext = ".jpg"
+	}
+
+	// Determine content type
+	contentType := "image/jpeg"
+	if ext == ".png" {
+		contentType = "image/png"
+	}
+
+	// Upload to S3 if enabled
+	if storage.IsEnabled() {
+		// Use fileUniqueID for stable filename (doesn't change even if photo is re-uploaded)
+		s3Key := fmt.Sprintf("avatars/telegram/%d_%s%s", userID, fileUniqueID, ext)
+
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+
+		if err := storage.Upload(ctx, s3Key, imgData, contentType); err != nil {
+			log.Warning("Failed to upload Telegram avatar to S3: %v", err)
+			// Fall back to returning the Telegram URL (it will expire but at least works temporarily)
+			return photoURL
+		}
+
+		log.Info("Stored Telegram avatar for user %d in S3: %s", userID, s3Key)
+		return s3Key
+	}
+
+	// S3 not enabled, return the Telegram URL (will expire)
+	log.Warning("S3 not enabled, returning expiring Telegram avatar URL")
 	return photoURL
 }
 
