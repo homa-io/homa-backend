@@ -382,7 +382,9 @@ func (m *Message) AfterCreate(tx *gorm.DB) error {
 
 	// Send outbound message to external channels (Telegram, WhatsApp, etc.)
 	// Only for agent messages (UserID is set, not ClientID)
+	log.Info("Message.AfterCreate: ID=%d, UserID=%v, ClientID=%v, IsSystem=%v", m.ID, m.UserID, m.ClientID, m.IsSystemMessage)
 	if m.UserID != nil && !m.IsSystemMessage {
+		log.Info("Message.AfterCreate: Agent message detected, will check bot handling for conv %d", m.ConversationID)
 		go m.sendToExternalChannel()
 
 		// Auto-disable bot handling when a human agent sends a message
@@ -406,19 +408,25 @@ func (m *Message) AfterCreate(tx *gorm.DB) error {
 
 // checkAndDisableBotHandling disables bot handling when a human agent sends a message
 func (m *Message) checkAndDisableBotHandling() {
+	log.Info("checkAndDisableBotHandling called for message %d, UserID: %v", m.ID, m.UserID)
+
 	if m.UserID == nil {
+		log.Info("checkAndDisableBotHandling: UserID is nil, skipping")
 		return
 	}
 
 	// Get the user to check if they are a bot
 	var user auth.User
-	if err := db.Where("user_id = ?", m.UserID.String()).First(&user).Error; err != nil {
+	if err := db.Where("id = ?", m.UserID.String()).First(&user).Error; err != nil {
 		log.Warning("Failed to get user for bot handling check: %v", err)
 		return
 	}
 
+	log.Info("checkAndDisableBotHandling: User %s (type: %s) sent message", user.DisplayName, user.Type)
+
 	// If the user is a bot, don't disable bot handling
-	if user.Type == "bot" {
+	if user.Type == auth.UserTypeBot {
+		log.Info("checkAndDisableBotHandling: User is a bot, skipping")
 		return
 	}
 
@@ -431,6 +439,7 @@ func (m *Message) checkAndDisableBotHandling() {
 
 	// If bot handling is already disabled, nothing to do
 	if !conversation.HandleByBot {
+		log.Info("checkAndDisableBotHandling: Bot handling already disabled for conversation %d", m.ConversationID)
 		return
 	}
 

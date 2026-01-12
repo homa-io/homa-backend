@@ -892,13 +892,17 @@ func (ac AgentController) GetConversationMessages(req *evo.Request) interface{} 
 		// Determine author based on user_id and client_id
 		isAgent := false
 		if msg.UserID != nil {
-			// Message from agent
+			// Message from agent or bot
 			isAgent = true
 			authorType = "agent"
 			if msg.User != nil {
 				authorID = msg.User.UserID.String()
 				authorName = msg.User.DisplayName
 				avatarURL = msg.User.Avatar
+				// Use actual user type (bot vs agent)
+				if msg.User.Type == auth.UserTypeBot {
+					authorType = "bot"
+				}
 			}
 		} else if msg.ClientID != nil {
 			// Message from customer
@@ -1209,6 +1213,10 @@ func (ac AgentController) GetConversationDetail(req *evo.Request) interface{} {
 				authorID = msg.User.UserID.String()
 				authorName = msg.User.DisplayName
 				avatarURL = msg.User.Avatar
+				// Use actual user type (bot vs agent)
+				if msg.User.Type == auth.UserTypeBot {
+					authorType = "bot"
+				}
 			}
 		} else if msg.ClientID != nil {
 			authorType = "customer"
