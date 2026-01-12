@@ -76,12 +76,14 @@ type GetProfileResponse struct {
 
 // EditProfileRequest defines the structure for the edit profile request
 type EditProfileRequest struct {
-	Name        string  `json:"name"`
-	LastName    string  `json:"last_name"`
-	DisplayName string  `json:"display_name"`
-	Avatar      *string `json:"avatar"`
-	Password    *string `json:"password"`
-	Language    *string `json:"language"`
+	Name                  string  `json:"name"`
+	LastName              string  `json:"last_name"`
+	DisplayName           string  `json:"display_name"`
+	Avatar                *string `json:"avatar"`
+	Password              *string `json:"password"`
+	Language              *string `json:"language"`
+	AutoTranslateIncoming *bool   `json:"auto_translate_incoming"`
+	AutoTranslateOutgoing *bool   `json:"auto_translate_outgoing"`
 }
 
 type LoginRequest struct {
@@ -626,6 +628,12 @@ func (c Controller) EditProfile(req *evo.Request) interface{} {
 	}
 	if params.Language != nil && *params.Language != "" {
 		user.Language = *params.Language
+	}
+	if params.AutoTranslateIncoming != nil {
+		user.AutoTranslateIncoming = *params.AutoTranslateIncoming
+	}
+	if params.AutoTranslateOutgoing != nil {
+		user.AutoTranslateOutgoing = *params.AutoTranslateOutgoing
 	}
 
 	if params.Password != nil && *params.Password != "" {

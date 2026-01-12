@@ -16,6 +16,9 @@ import (
 	"gorm.io/gorm/clause"
 )
 
+// Language detection function - set by the ai package to avoid circular imports
+var DetectMessageLanguage func(text string) string
+
 // Conversation status constants
 const (
 	ConversationStatusNew          = "new"
@@ -57,6 +60,7 @@ type Conversation struct {
 	Secret       string         `gorm:"column:secret;size:32;not null" json:"-"` // Hidden from JSON - only returned on creation via CreateConversationResponse
 	Status          string         `gorm:"column:status;size:50;not null;index;check:status IN ('new','wait_for_agent','in_progress','wait_for_user','on_hold','resolved','closed','unresolved','spam')" json:"status"`
 	Priority        string         `gorm:"column:priority;size:50;not null;index;check:priority IN ('low','medium','high','urgent')" json:"priority"`
+	HandleByBot     bool           `gorm:"column:handle_by_bot;default:1" json:"handle_by_bot"`
 	CustomFields    datatypes.JSON `gorm:"column:custom_fields;type:json" json:"custom_fields"`
 	IP              *string        `gorm:"column:ip;size:45" json:"ip"`
 	Browser         *string        `gorm:"column:browser;size:255" json:"browser"`
@@ -82,6 +86,7 @@ type Message struct {
 	UserID          *uuid.UUID `gorm:"column:user_id;type:char(36);index;fk:users" json:"user_id"`
 	ClientID        *uuid.UUID `gorm:"column:client_id;type:char(36);index;fk:clients" json:"client_id"`
 	Body            string     `gorm:"column:body;type:text;not null" json:"body"`
+	Language        string     `gorm:"column:language;size:10" json:"language"`
 	IsSystemMessage bool       `gorm:"column:is_system_message;default:0" json:"is_system_message"`
 	CreatedAt       time.Time  `gorm:"column:created_at;autoCreateTime" json:"created_at"`
 
@@ -115,6 +120,7 @@ func (c *Conversation) ToWebhookData() map[string]any {
 		"external_id":      c.ExternalID,
 		"status":           c.Status,
 		"priority":         c.Priority,
+		"handle_by_bot":    c.HandleByBot,
 		"custom_fields":    c.CustomFields,
 		"ip":               c.IP,
 		"browser":          c.Browser,
@@ -296,6 +302,21 @@ func (c *Conversation) assignDepartmentUsers(tx *gorm.DB) {
 
 // GORM Hooks for Message
 
+// BeforeCreate hook - detect message language before saving
+func (m *Message) BeforeCreate(tx *gorm.DB) error {
+	// Skip language detection for system messages or if already set
+	if m.IsSystemMessage || m.Language != "" {
+		return nil
+	}
+
+	// Detect language if the detection function is available
+	if DetectMessageLanguage != nil && m.Body != "" {
+		m.Language = DetectMessageLanguage(m.Body)
+	}
+
+	return nil
+}
+
 // AfterCreate hook - broadcast message creation to NATS and webhooks
 func (m *Message) AfterCreate(tx *gorm.DB) error {
 	// Broadcast to NATS
@@ -308,6 +329,13 @@ func (m *Message) AfterCreate(tx *gorm.DB) error {
 		if m.UserID != nil {
 			senderID = m.UserID.String()
 			senderType = "agent"
+			// Preload user info for agent messages
+			if m.User == nil {
+				var msg Message
+				if err := db.Preload("User").First(&msg, m.ID).Error; err == nil && msg.User != nil {
+					m.User = msg.User
+				}
+			}
 		} else if m.ClientID != nil {
 			senderID = m.ClientID.String()
 			senderType = "client"
@@ -356,6 +384,9 @@ func (m *Message) AfterCreate(tx *gorm.DB) error {
 	// Only for agent messages (UserID is set, not ClientID)
 	if m.UserID != nil && !m.IsSystemMessage {
 		go m.sendToExternalChannel()
+
+		// Auto-disable bot handling when a human agent sends a message
+		go m.checkAndDisableBotHandling()
 	}
 
 	// Process incoming customer messages with AI agent
@@ -371,6 +402,45 @@ func (m *Message) AfterCreate(tx *gorm.DB) error {
 	}
 
 	return nil
+}
+
+// checkAndDisableBotHandling disables bot handling when a human agent sends a message
+func (m *Message) checkAndDisableBotHandling() {
+	if m.UserID == nil {
+		return
+	}
+
+	// Get the user to check if they are a bot
+	var user auth.User
+	if err := db.Where("user_id = ?", m.UserID.String()).First(&user).Error; err != nil {
+		log.Warning("Failed to get user for bot handling check: %v", err)
+		return
+	}
+
+	// If the user is a bot, don't disable bot handling
+	if user.Type == "bot" {
+		return
+	}
+
+	// Get the conversation
+	var conversation Conversation
+	if err := db.First(&conversation, m.ConversationID).Error; err != nil {
+		log.Warning("Failed to get conversation for bot handling check: %v", err)
+		return
+	}
+
+	// If bot handling is already disabled, nothing to do
+	if !conversation.HandleByBot {
+		return
+	}
+
+	// Disable bot handling
+	if err := db.Model(&Conversation{}).Where("id = ?", m.ConversationID).Update("handle_by_bot", false).Error; err != nil {
+		log.Error("Failed to disable bot handling for conversation %d: %v", m.ConversationID, err)
+		return
+	}
+
+	log.Info("Bot handling disabled for conversation %d because human agent %s sent a message", m.ConversationID, user.DisplayName)
 }
 
 // sendToExternalChannel sends the message to the appropriate external channel

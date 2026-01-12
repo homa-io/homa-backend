@@ -9,25 +9,47 @@ import (
 )
 
 // GenerateSystemPrompt creates a system prompt from AIAgent configuration
-// Uses GenerateAgentTemplate as the base and adds customer context
+// Uses the Jet template system with customizable template and separate tool documentation
 func GenerateSystemPrompt(agent *models.AIAgent, tools []models.AIAgentTool, client *models.Client, conversation *models.Conversation) string {
-	// Use the template generator as the single source of truth for the base prompt
-	ctx := TemplateContext{
-		ProjectName:        "", // Will use default "the company"
-		Agent:              agent,
-		Tools:              tools,
-		KnowledgeBaseItems: []KnowledgeBaseItem{}, // KB items are searched dynamically
+	// Get project name from settings
+	projectName := models.GetSettingValue("general.project_name", "")
+	if projectName == "" {
+		projectName = models.GetSettingValue("general.company_name", "the company")
 	}
 
-	basePrompt := GenerateAgentTemplate(ctx)
+	// Build template data for Jet template
+	templateData := BuildTemplateData(agent, projectName)
+
+	// Get the custom template from settings, or use default
+	customTemplate := models.GetSettingValue(SettingKeyBotPromptTemplate, "")
+	templateContent := customTemplate
+	if templateContent == "" {
+		templateContent = GetDefaultBotPromptTemplate()
+	}
+
+	// Render the Jet template
+	prompt, err := RenderBotPromptTemplate(templateContent, templateData)
+	if err != nil {
+		// Fall back to default template on error
+		prompt, _ = RenderBotPromptTemplate(GetDefaultBotPromptTemplate(), templateData)
+	}
+
+	// Generate tool documentation separately (not customizable)
+	toolDocs := GenerateToolDocumentation(agent, tools)
+
+	// Combine prompt and tool docs
+	result := prompt
+	if toolDocs != "" {
+		result = prompt + "\n\n" + toolDocs
+	}
 
 	// Add customer context if available
 	customerContext := generateCustomerContext(client, conversation)
 	if customerContext != "" {
-		basePrompt += "\n\n" + customerContext
+		result += "\n\n" + customerContext
 	}
 
-	return basePrompt
+	return result
 }
 
 // generateCustomerContext creates context about the current customer

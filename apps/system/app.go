@@ -6,9 +6,9 @@ import (
 	"github.com/getevo/evo/v2/lib/settings"
 	"github.com/getevo/restify"
 	"github.com/gofiber/fiber/v2"
-	"github.com/gofiber/fiber/v2/middleware/cors"
 	"github.com/gofiber/fiber/v2/middleware/limiter"
 	"github.com/gofiber/fiber/v2/middleware/logger"
+	"github.com/iesreza/homa-backend/apps/minify"
 	"strings"
 	"time"
 )
@@ -67,22 +67,9 @@ func (a App) Register() error {
 		log.Info("Rate limiting enabled: %d requests per minute", RateLimitRequests)
 	}
 
-	// Add CORS middleware for public API endpoints (widget integration)
-	app.Use("/api/client", cors.New(cors.Config{
-		AllowOrigins:     "*",
-		AllowMethods:     "GET,POST,PUT,PATCH,DELETE,OPTIONS",
-		AllowHeaders:     "Origin,Content-Type,Accept,Authorization",
-		AllowCredentials: false,
-		MaxAge:           86400,
-	}))
-
-	// CORS for widget static files
-	app.Use("/widget", cors.New(cors.Config{
-		AllowOrigins: "*",
-		AllowMethods: "GET,OPTIONS",
-		AllowHeaders: "Origin,Content-Type,Accept",
-		MaxAge:       86400,
-	}))
+	// NOTE: CORS is handled by nginx reverse proxy, not here.
+	// Adding CORS headers in both nginx and Go causes duplicate headers which browsers reject.
+	// See /etc/nginx/sites-enabled/api.getevo.dev for CORS configuration.
 
 	restify.SetPrefix("/api/restify")
 
@@ -106,6 +93,10 @@ func (a App) Router() error {
 	evo.Put("/api/settings/:key", controller.SetSetting)
 	evo.Delete("/api/settings/:key", controller.DeleteSetting)
 
+	// Serve minified widget JS (must be before static handler)
+	var minifyController = minify.NewController("./static/widget")
+	evo.GetFiber().Get("/widget/*", minifyController.ServeMinifiedJS)
+
 	// Serve static files
 	evo.Static("/static", "./static")
 	evo.Static("/uploads", "./uploads")
@@ -126,6 +117,9 @@ func (a App) Router() error {
 }
 
 func (a App) WhenReady() error {
+	// Clear minify cache on startup
+	minify.DefaultMinifier().ClearCache()
+	log.Info("JS minify cache cleared on startup")
 	return nil
 }
 

@@ -2984,6 +2984,7 @@ func (c Controller) DeleteAIAgent(request *evo.Request) any {
 }
 
 // GetAIAgentTemplate generates and returns the system prompt template for an AI agent
+// Uses the Jet template system with customizable template and separate tool documentation
 func (c Controller) GetAIAgentTemplate(request *evo.Request) any {
 	id := request.Param("id").String()
 
@@ -3004,30 +3005,38 @@ func (c Controller) GetAIAgentTemplate(request *evo.Request) any {
 	// Get project name from settings
 	projectName := models.GetSettingValue("general.project_name", "Your Project")
 
-	// Load knowledge base articles (just titles) if knowledge base is enabled
-	var kbItems []ai.KnowledgeBaseItem
-	if agent.UseKnowledgeBase {
-		var articles []models.KnowledgeBaseArticle
-		db.Select("id, title").Where("status = ?", "published").Find(&articles)
-		for _, a := range articles {
-			kbItems = append(kbItems, ai.KnowledgeBaseItem{
-				ID:    a.ID.String(),
-				Title: a.Title,
-			})
-		}
+	// Build template data for Jet template
+	templateData := ai.BuildTemplateData(&agent, projectName)
+
+	// Get the custom template from settings, or use default
+	customTemplate := models.GetSettingValue(ai.SettingKeyBotPromptTemplate, "")
+	templateContent := customTemplate
+	if templateContent == "" {
+		templateContent = ai.GetDefaultBotPromptTemplate()
 	}
 
-	// Generate the template
-	template := ai.GenerateAgentTemplate(ai.TemplateContext{
-		ProjectName:        projectName,
-		Agent:              &agent,
-		Tools:              tools,
-		KnowledgeBaseItems: kbItems,
-	})
+	// Render the Jet template
+	prompt, err := ai.RenderBotPromptTemplate(templateContent, templateData)
+	if err != nil {
+		// Fall back to default template on error
+		prompt, _ = ai.RenderBotPromptTemplate(ai.GetDefaultBotPromptTemplate(), templateData)
+	}
+
+	// Generate tool documentation separately (not customizable)
+	toolDocs := ai.GenerateToolDocumentation(&agent, tools)
+
+	// Combine prompt and tool docs for the full template
+	fullTemplate := prompt
+	if toolDocs != "" {
+		fullTemplate = prompt + "\n\n" + toolDocs
+	}
 
 	return response.OK(map[string]any{
-		"template":    template,
-		"token_count": len(template) / 4, // Approximate token count
+		"template":    fullTemplate,
+		"prompt":      prompt,
+		"tool_docs":   toolDocs,
+		"is_custom":   customTemplate != "",
+		"token_count": len(fullTemplate) / 4, // Approximate token count
 	})
 }
 

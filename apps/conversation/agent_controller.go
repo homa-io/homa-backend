@@ -10,6 +10,7 @@ import (
 	"github.com/getevo/evo/v2/lib/db"
 	"github.com/getevo/evo/v2/lib/log"
 	"github.com/google/uuid"
+	"github.com/iesreza/homa-backend/apps/ai"
 	"github.com/iesreza/homa-backend/apps/auth"
 	"github.com/iesreza/homa-backend/apps/models"
 	"github.com/iesreza/homa-backend/lib/imageutil"
@@ -38,6 +39,7 @@ type ConversationListItem struct {
 	Title                string                  `json:"title"`
 	Status               string                  `json:"status"`
 	Priority             string                  `json:"priority"`
+	HandleByBot          bool                    `json:"handle_by_bot"`
 	Channel              string                  `json:"channel"`
 	CreatedAt            string                  `json:"created_at"`
 	UpdatedAt            string                  `json:"updated_at"`
@@ -83,8 +85,9 @@ type AgentInfo struct {
 }
 
 type DepartmentInfo struct {
-	ID   uint   `json:"id"`
-	Name string `json:"name"`
+	ID         uint  `json:"id"`
+	Name       string `json:"name"`
+	AIAgentID  *uint  `json:"ai_agent_id"`
 }
 
 type TagInfo struct {
@@ -415,8 +418,9 @@ func (ac AgentController) SearchConversations(req *evo.Request) interface{} {
 		var department *DepartmentInfo
 		if conv.Department != nil {
 			department = &DepartmentInfo{
-				ID:   conv.Department.ID,
-				Name: conv.Department.Name,
+				ID:        conv.Department.ID,
+				Name:      conv.Department.Name,
+				AIAgentID: conv.Department.AIAgentID,
 			}
 		}
 
@@ -426,6 +430,7 @@ func (ac AgentController) SearchConversations(req *evo.Request) interface{} {
 			Title:               conv.Title,
 			Status:              conv.Status,
 			Priority:            conv.Priority,
+			HandleByBot:         conv.HandleByBot,
 			Channel:             conv.ChannelID,
 			CreatedAt:           conv.CreatedAt.Format("2006-01-02T15:04:05Z07:00"),
 			UpdatedAt:           conv.UpdatedAt.Format("2006-01-02T15:04:05Z07:00"),
@@ -762,6 +767,7 @@ func (ac AgentController) CreateTag(req *evo.Request) interface{} {
 type MessageItem struct {
 	ID              uint         `json:"id"`
 	Body            string       `json:"body"`
+	Language        string       `json:"language"`
 	IsAgent         bool         `json:"is_agent"`
 	IsSystemMessage bool         `json:"is_system_message"`
 	CreatedAt       string       `json:"created_at"`
@@ -1054,8 +1060,9 @@ func (ac AgentController) GetConversationDetail(req *evo.Request) interface{} {
 	var department *DepartmentInfo
 	if conv.Department != nil {
 		department = &DepartmentInfo{
-			ID:   conv.Department.ID,
-			Name: conv.Department.Name,
+			ID:        conv.Department.ID,
+			Name:      conv.Department.Name,
+			AIAgentID: conv.Department.AIAgentID,
 		}
 	}
 
@@ -1111,6 +1118,7 @@ func (ac AgentController) GetConversationDetail(req *evo.Request) interface{} {
 		Title:               conv.Title,
 		Status:              conv.Status,
 		Priority:            conv.Priority,
+		HandleByBot:         conv.HandleByBot,
 		Channel:             conv.ChannelID,
 		CreatedAt:           conv.CreatedAt.Format("2006-01-02T15:04:05Z07:00"),
 		UpdatedAt:           conv.UpdatedAt.Format("2006-01-02T15:04:05Z07:00"),
@@ -1230,6 +1238,7 @@ func (ac AgentController) GetConversationDetail(req *evo.Request) interface{} {
 		messageItem := MessageItem{
 			ID:              msg.ID,
 			Body:            msg.Body,
+			Language:        msg.Language,
 			IsAgent:         isAgent,
 			IsSystemMessage: msg.IsSystemMessage,
 			CreatedAt:       msg.CreatedAt.Format("2006-01-02T15:04:05Z07:00"),
@@ -1371,6 +1380,7 @@ type UpdateConversationRequest struct {
 	Priority     *string `json:"priority"`
 	Status       *string `json:"status"`
 	DepartmentID *uint   `json:"department_id"`
+	HandleByBot  *bool   `json:"handle_by_bot"`
 }
 
 // UpdateConversationProperties handles the PATCH /api/agent/conversations/:id endpoint
@@ -1427,6 +1437,10 @@ func (ac AgentController) UpdateConversationProperties(req *evo.Request) interfa
 		updateData["department_id"] = *updateReq.DepartmentID
 	}
 
+	if updateReq.HandleByBot != nil {
+		updateData["handle_by_bot"] = *updateReq.HandleByBot
+	}
+
 	// Perform update
 	if len(updateData) > 0 {
 		if err := db.Model(&conversation).Updates(updateData).Error; err != nil {
@@ -1445,6 +1459,7 @@ func (ac AgentController) UpdateConversationProperties(req *evo.Request) interfa
 		"priority":      conversation.Priority,
 		"status":        conversation.Status,
 		"department_id": conversation.DepartmentID,
+		"handle_by_bot": conversation.HandleByBot,
 		"updated_at":    conversation.UpdatedAt.Format("2006-01-02T15:04:05Z07:00"),
 	})
 }
@@ -1900,15 +1915,16 @@ func (ac AgentController) AddAgentMessage(req *evo.Request) interface{} {
 	}
 
 	// Get authenticated agent's user ID from JWT token
+	var user *auth.User
 	var userID uuid.UUID
 	if !req.User().Anonymous() {
-		user := req.User().Interface().(*auth.User)
+		user = req.User().Interface().(*auth.User)
 		userID = user.UserID
 	}
 
-	// Verify conversation exists
+	// Verify conversation exists and get client info
 	var conversation models.Conversation
-	if err := db.Where("id = ?", conversationID).First(&conversation).Error; err != nil {
+	if err := db.Preload("Client").Where("id = ?", conversationID).First(&conversation).Error; err != nil {
 		return response.Error(response.NewErrorWithDetails(response.ErrorCodeNotFound, "Conversation not found", 404, fmt.Sprintf("No conversation exists with ID %d", conversationID)))
 	}
 
@@ -1923,11 +1939,49 @@ func (ac AgentController) AddAgentMessage(req *evo.Request) interface{} {
 		return response.Error(response.NewErrorWithDetails(response.ErrorCodeInvalidInput, "Message body is required", 400, "Message body cannot be empty"))
 	}
 
+	originalBody := input.Body
+	messageBody := input.Body
+	var translationRecord *models.ConversationMessageTranslation
+
+	// Auto-translate outgoing if enabled
+	if user != nil && user.AutoTranslateOutgoing {
+		// Get customer language
+		customerLang := "en"
+		if conversation.Client.Language != nil && *conversation.Client.Language != "" {
+			customerLang = *conversation.Client.Language
+		}
+
+		// Get agent language
+		agentLang := user.Language
+		if agentLang == "" {
+			agentLang = "en"
+		}
+
+		// Translate if languages differ
+		if customerLang != agentLang {
+			translated, err := ai.TranslateText(input.Body, agentLang, customerLang)
+			if err != nil {
+				log.Warning("Failed to translate outgoing message: %v", err)
+				// Continue with original message if translation fails
+			} else {
+				messageBody = translated
+				// Prepare translation record to save after message is created
+				translationRecord = &models.ConversationMessageTranslation{
+					ConversationID: conversationID,
+					FromLang:       agentLang,
+					ToLang:         customerLang,
+					Content:        originalBody, // Store original for agent to see
+					Type:           models.TranslationTypeOutgoing,
+				}
+			}
+		}
+	}
+
 	// Create message with UserID (agent) as sender
 	message := models.Message{
 		ConversationID:  conversationID,
 		UserID:          &userID,
-		Body:            input.Body,
+		Body:            messageBody,
 		IsSystemMessage: false,
 	}
 
@@ -1936,14 +1990,33 @@ func (ac AgentController) AddAgentMessage(req *evo.Request) interface{} {
 		return response.Error(response.NewErrorWithDetails(response.ErrorCodeDatabaseError, "Failed to create message", 500, err.Error()))
 	}
 
+	// Save translation record if translation was done
+	if translationRecord != nil {
+		translationRecord.MessageID = message.ID
+		if err := db.Create(translationRecord).Error; err != nil {
+			log.Warning("Failed to save translation record: %v", err)
+		}
+	}
+
 	// Load related data for response
 	if err := db.Preload("Conversation").Preload("User").First(&message, message.ID).Error; err != nil {
 		log.Warning("Failed to preload message relations:", err)
 	}
 
-	return response.Created(map[string]interface{}{
+	// Include translation info in response
+	responseData := map[string]interface{}{
 		"message": message,
-	})
+	}
+	if translationRecord != nil {
+		responseData["translation"] = map[string]interface{}{
+			"original_content":   originalBody,
+			"translated_content": messageBody,
+			"from_lang":          translationRecord.FromLang,
+			"to_lang":            translationRecord.ToLang,
+		}
+	}
+
+	return response.Created(responseData)
 }
 
 // Helper function to validate attribute name

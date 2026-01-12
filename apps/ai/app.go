@@ -59,6 +59,12 @@ func (a App) Router() error {
 	evo.Get("/api/ai/conversation-summary/:id", controller.GetConversationSummaryHandler)
 	evo.Post("/api/ai/conversation-summary/:id/generate", controller.GenerateConversationSummaryHandler)
 
+	// Bot prompt template endpoints
+	evo.Get("/api/admin/ai/template/default", GetDefaultTemplateHandler)
+	evo.Get("/api/admin/ai/template", GetCurrentTemplateHandler)
+	evo.Post("/api/admin/ai/template/preview", PreviewTemplateHandler)
+	evo.Post("/api/admin/ai/template/validate", ValidateTemplateHandler)
+
 	return nil
 }
 
@@ -68,6 +74,10 @@ func (a App) WhenReady() error {
 	// This avoids circular import between ai and models packages
 	models.ProcessIncomingMessage = ProcessIncomingMessage
 	log.Info("AI agent message processing registered")
+
+	// Register language detection function for message language detection
+	models.DetectMessageLanguage = DetectLanguage
+	log.Info("Language detection for messages registered")
 
 	// Subscribe to settings reload events
 	if natsconn.IsConnected() {

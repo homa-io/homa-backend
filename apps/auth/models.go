@@ -79,8 +79,10 @@ type User struct {
 	PasswordHash *string   `gorm:"column:password_hash;size:255" json:"password_hash,omitempty"`
 	APIKey       *string   `gorm:"column:api_key;size:255;uniqueIndex" json:"api_key,omitempty"`
 	SecurityKey  *string   `gorm:"column:security_key;size:50" json:"security_key,omitempty"`
-	Language     string    `gorm:"column:language;size:10;not null;default:'en'" json:"language"`
-	Type         string    `gorm:"column:type;size:50;not null;check:type IN ('agent','administrator','bot')" json:"type"`
+	Language               string `gorm:"column:language;size:10;not null;default:'en'" json:"language"`
+	AutoTranslateIncoming  bool   `gorm:"column:auto_translate_incoming;not null;default:false" json:"auto_translate_incoming"`
+	AutoTranslateOutgoing  bool   `gorm:"column:auto_translate_outgoing;not null;default:false" json:"auto_translate_outgoing"`
+	Type                   string `gorm:"column:type;size:50;not null;check:type IN ('agent','administrator','bot')" json:"type"`
 	Status       string    `gorm:"column:status;size:20;not null;default:'active';check:status IN ('active','blocked')" json:"status"`
 	CreatedAt    time.Time `gorm:"column:created_at;autoCreateTime" json:"created_at"`
 	UpdatedAt    time.Time `gorm:"column:updated_at;autoUpdateTime" json:"updated_at"`
@@ -137,17 +139,19 @@ func (u *User) AfterUpdate(tx *gorm.DB) error {
 // ToWebhookData returns a sanitized version of the user without sensitive data
 func (u *User) ToWebhookData() map[string]any {
 	userData := map[string]any{
-		"id":           u.UserID,
-		"name":         u.Name,
-		"last_name":    u.LastName,
-		"display_name": u.DisplayName,
-		"email":        u.Email,
-		"type":         u.Type,
-		"status":       u.Status,
-		"avatar":       u.Avatar,
-		"language":     u.Language,
-		"created_at":   u.CreatedAt,
-		"updated_at":   u.UpdatedAt,
+		"id":                      u.UserID,
+		"name":                    u.Name,
+		"last_name":               u.LastName,
+		"display_name":            u.DisplayName,
+		"email":                   u.Email,
+		"type":                    u.Type,
+		"status":                  u.Status,
+		"avatar":                  u.Avatar,
+		"language":                u.Language,
+		"auto_translate_incoming": u.AutoTranslateIncoming,
+		"auto_translate_outgoing": u.AutoTranslateOutgoing,
+		"created_at":              u.CreatedAt,
+		"updated_at":              u.UpdatedAt,
 	}
 	// Include security_key for bots
 	if u.Type == UserTypeBot && u.SecurityKey != nil {

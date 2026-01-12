@@ -51,6 +51,12 @@ func ProcessIncomingMessage(message *models.Message) error {
 		return nil
 	}
 
+	// 4.5. Check if bot handling is enabled for this conversation
+	if !conversation.HandleByBot {
+		log.Debug("Bot handling disabled for conversation %d, skipping", conversation.ID)
+		return nil
+	}
+
 	// 5. Check if bot user exists
 	if aiAgent.Bot == nil {
 		log.Warning("AI agent %d has no bot user configured", aiAgent.ID)

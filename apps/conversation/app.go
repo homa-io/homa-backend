@@ -14,6 +14,7 @@ func (a App) Register() error {
 func (a App) Router() error {
 	var controller = Controller{}
 	var agentController = AgentController{}
+	var translationController = TranslationController{}
 
 	// Client-facing APIs
 	evo.Put("/api/client/conversations", controller.CreateConversation)
@@ -72,6 +73,12 @@ func (a App) Router() error {
 	// User Avatar APIs
 	evo.Post("/api/agent/me/avatar", agentController.UploadUserAvatar)
 	evo.Delete("/api/agent/me/avatar", agentController.DeleteUserAvatar)
+
+	// Translation APIs
+	evo.Post("/api/agent/conversations/:id/translations", translationController.GetTranslations)
+	evo.Post("/api/agent/conversations/:id/outgoing-translations", translationController.GetOutgoingTranslations)
+	evo.Post("/api/agent/conversations/:id/translate-outgoing", translationController.TranslateOutgoing)
+	evo.Get("/api/agent/conversations/:id/language-info", translationController.GetLanguageInfo)
 
 	return nil
 }
