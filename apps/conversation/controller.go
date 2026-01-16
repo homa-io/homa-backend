@@ -335,17 +335,27 @@ func (c Controller) GetConversationWithSecret(req *evo.Request) interface{} {
 		return response.Error(response.NewError(response.ErrorCodeUnauthorized, "Invalid secret", 401))
 	}
 
-	// Count total messages for this conversation
+	// Count total messages for this conversation (excluding action messages for clients)
 	var totalMessages int64
-	if err := db.Model(&models.Message{}).Where("conversation_id = ?", conversation.ID).Count(&totalMessages).Error; err != nil {
+	if err := db.Model(&models.Message{}).Where("conversation_id = ? AND (type != ? OR type IS NULL)", conversation.ID, models.MessageTypeAction).Count(&totalMessages).Error; err != nil {
 		log.Error("Failed to count messages:", err)
 		return response.Error(response.NewError(response.ErrorCodeDatabaseError, "Failed to count messages", 500))
 	}
 
+	// If no offset specified, calculate offset to get the LATEST messages
+	// This ensures the chat widget shows the most recent messages by default
+	if req.Query("offset").String() == "" && totalMessages > int64(limit) {
+		offset = int(totalMessages) - limit
+		if offset < 0 {
+			offset = 0
+		}
+	}
+
 	// Get messages with pagination, ordered by created_at ASC, with all associations preloaded
+	// Exclude action messages from client view (they are internal activity logs)
 	var messages []models.Message
 	if err := db.Preload("Conversation").Preload("Client").Preload("User").
-		Where("conversation_id = ?", conversation.ID).
+		Where("conversation_id = ? AND (type != ? OR type IS NULL)", conversation.ID, models.MessageTypeAction).
 		Order("created_at ASC").
 		Offset(offset).Limit(limit).
 		Find(&messages).Error; err != nil {

@@ -758,8 +758,12 @@
   const STORAGE_KEYS = {
     CONVERSATION: 'homa_chat_conversation',
     USER: 'homa_chat_user',
-    MESSAGES: 'homa_chat_messages'
+    MESSAGES: 'homa_chat_messages',
+    SESSION_START: 'homa_chat_session_start'
   };
+
+  // Session expiry time (24 hours in milliseconds)
+  const SESSION_EXPIRY_MS = 24 * 60 * 60 * 1000;
 
   // ==========================================
   // Utility Functions
@@ -992,8 +996,9 @@
         secret: response.data.secret
       };
 
-      // Store conversation
+      // Store conversation and session start time
       safeLocalStorage('set', STORAGE_KEYS.CONVERSATION, conversation);
+      safeLocalStorage('set', STORAGE_KEYS.SESSION_START, Date.now());
 
       // Connect WebSocket
       connectWebSocket();
@@ -2194,8 +2199,9 @@
         secret: response.data.secret
       };
 
-      // Store conversation
+      // Store conversation and session start time
       safeLocalStorage('set', STORAGE_KEYS.CONVERSATION, conversation);
+      safeLocalStorage('set', STORAGE_KEYS.SESSION_START, Date.now());
 
       // Connect WebSocket
       connectWebSocket();
@@ -2485,6 +2491,21 @@
     conversation = safeLocalStorage('get', STORAGE_KEYS.CONVERSATION);
     user = safeLocalStorage('get', STORAGE_KEYS.USER);
     messages = safeLocalStorage('get', STORAGE_KEYS.MESSAGES) || [];
+
+    // Check if session has expired (24 hours)
+    const sessionStart = safeLocalStorage('get', STORAGE_KEYS.SESSION_START);
+    if (conversation && sessionStart) {
+      const sessionAge = Date.now() - sessionStart;
+      if (sessionAge > SESSION_EXPIRY_MS) {
+        // Session expired - clear conversation data and start fresh
+        console.log('HomaChat: Session expired, starting new conversation');
+        safeLocalStorage('remove', STORAGE_KEYS.CONVERSATION);
+        safeLocalStorage('remove', STORAGE_KEYS.MESSAGES);
+        safeLocalStorage('remove', STORAGE_KEYS.SESSION_START);
+        conversation = null;
+        messages = [];
+      }
+    }
 
     // Create UI
     console.log('HomaChat: Creating UI...');

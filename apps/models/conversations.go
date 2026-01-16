@@ -32,6 +32,12 @@ const (
 	ConversationStatusSpam         = "spam"
 )
 
+// Message type constants
+const (
+	MessageTypeMessage = "message"
+	MessageTypeAction  = "action"
+)
+
 // Conversation priority constants
 const (
 	ConversationPriorityLow    = "low"
@@ -86,6 +92,7 @@ type Message struct {
 	UserID          *uuid.UUID `gorm:"column:user_id;type:char(36);index;fk:users" json:"user_id"`
 	ClientID        *uuid.UUID `gorm:"column:client_id;type:char(36);index;fk:clients" json:"client_id"`
 	Body            string     `gorm:"column:body;type:text;not null" json:"body"`
+	Type            string     `gorm:"column:type;type:enum('message','action');default:'message';not null" json:"type"`
 	Language        string     `gorm:"column:language;size:10" json:"language"`
 	IsSystemMessage bool       `gorm:"column:is_system_message;default:0" json:"is_system_message"`
 	CreatedAt       time.Time  `gorm:"column:created_at;autoCreateTime" json:"created_at"`
@@ -96,6 +103,35 @@ type Message struct {
 	Client       *Client      `gorm:"foreignKey:ClientID;references:ID" json:"client,omitempty"`
 
 	restify.API
+}
+
+// CreateActionMessage creates an action message for conversation activity logs
+// actorName: name of the person/system performing the action (empty for system actions)
+// conversationID: the conversation this action belongs to
+// userID: optional user ID if action was performed by a user (nil for system actions)
+// action: the action description with variables in quotes, e.g. 'switched status to "Closed"'
+func CreateActionMessage(conversationID uint, userID *uuid.UUID, actorName string, action string) error {
+	var body string
+	if actorName != "" {
+		body = fmt.Sprintf("%s %s", actorName, action)
+	} else {
+		body = action
+	}
+
+	message := Message{
+		ConversationID:  conversationID,
+		UserID:          userID,
+		Body:            body,
+		Type:            MessageTypeAction,
+		IsSystemMessage: true,
+	}
+
+	if err := db.Create(&message).Error; err != nil {
+		log.Error("Failed to create action message: ", err)
+		return err
+	}
+
+	return nil
 }
 
 type Tag struct {

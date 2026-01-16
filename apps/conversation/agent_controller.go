@@ -767,6 +767,7 @@ func (ac AgentController) CreateTag(req *evo.Request) interface{} {
 type MessageItem struct {
 	ID              uint         `json:"id"`
 	Body            string       `json:"body"`
+	Type            string       `json:"type"` // message or action
 	Language        string       `json:"language"`
 	IsAgent         bool         `json:"is_agent"`
 	IsSystemMessage bool         `json:"is_system_message"`
@@ -931,9 +932,16 @@ func (ac AgentController) GetConversationMessages(req *evo.Request) interface{} 
 			initials = strings.ToUpper(initials)
 		}
 
+		// Determine message type (default to "message" if empty)
+		msgType := msg.Type
+		if msgType == "" {
+			msgType = models.MessageTypeMessage
+		}
+
 		messageItem := MessageItem{
 			ID:              msg.ID,
 			Body:            msg.Body,
+			Type:            msgType,
 			IsAgent:         isAgent,
 			IsSystemMessage: msg.IsSystemMessage,
 			CreatedAt:       msg.CreatedAt.Format("2006-01-02T15:04:05Z07:00"),
@@ -1243,9 +1251,16 @@ func (ac AgentController) GetConversationDetail(req *evo.Request) interface{} {
 			msgInitials = strings.ToUpper(msgInitials)
 		}
 
+		// Determine message type (default to "message" if empty)
+		msgType := msg.Type
+		if msgType == "" {
+			msgType = models.MessageTypeMessage
+		}
+
 		messageItem := MessageItem{
 			ID:              msg.ID,
 			Body:            msg.Body,
+			Type:            msgType,
 			Language:        msg.Language,
 			IsAgent:         isAgent,
 			IsSystemMessage: msg.IsSystemMessage,
@@ -1405,10 +1420,63 @@ func (ac AgentController) UpdateConversationProperties(req *evo.Request) interfa
 		return response.Error(response.NewErrorWithDetails(response.ErrorCodeInvalidInput, "Invalid request body", 400, err.Error()))
 	}
 
-	// Find conversation
+	// Find conversation with department preloaded
 	var conversation models.Conversation
-	if err := db.Where("id = ?", conversationID).First(&conversation).Error; err != nil {
+	if err := db.Preload("Department").Where("id = ?", conversationID).First(&conversation).Error; err != nil {
 		return response.Error(response.NewErrorWithDetails(response.ErrorCodeNotFound, "Conversation not found", 404, fmt.Sprintf("No conversation exists with ID %d", conversationID)))
+	}
+
+	// Helper function to get human-readable status name
+	getStatusDisplayName := func(status string) string {
+		statusNames := map[string]string{
+			"new":         "New",
+			"user_reply":  "User Reply",
+			"agent_reply": "Agent Reply",
+			"processing":  "Processing",
+			"closed":      "Closed",
+			"archived":    "Archived",
+			"postponed":   "Postponed",
+		}
+		if name, ok := statusNames[status]; ok {
+			return name
+		}
+		return status
+	}
+
+	// Helper function to get human-readable priority name
+	getPriorityDisplayName := func(priority string) string {
+		priorityNames := map[string]string{
+			"low":    "Low",
+			"medium": "Medium",
+			"high":   "High",
+			"urgent": "Urgent",
+		}
+		if name, ok := priorityNames[priority]; ok {
+			return name
+		}
+		return priority
+	}
+
+	// Store old values for action messages
+	oldStatus := conversation.Status
+	oldPriority := conversation.Priority
+	oldDepartmentID := conversation.DepartmentID
+	oldDepartmentName := ""
+	if conversation.Department != nil {
+		oldDepartmentName = conversation.Department.Name
+	}
+	oldHandleByBot := conversation.HandleByBot
+
+	// Get current user for action messages
+	var actorName string
+	var userID *uuid.UUID
+	if !req.User().Anonymous() {
+		user := req.User().Interface().(*auth.User)
+		actorName = user.Name
+		if user.LastName != "" {
+			actorName = user.Name + " " + user.LastName
+		}
+		userID = &user.UserID
 	}
 
 	// Update fields if provided
@@ -1455,6 +1523,47 @@ func (ac AgentController) UpdateConversationProperties(req *evo.Request) interfa
 			log.Error("Failed to update conversation: ", err)
 			return response.Error(response.NewErrorWithDetails(response.ErrorCodeDatabaseError, "Failed to update conversation", 500, err.Error()))
 		}
+
+		// Create action messages for changes
+		go func() {
+			// Status change action message
+			if updateReq.Status != nil && *updateReq.Status != oldStatus {
+				action := fmt.Sprintf(`set conversation status to "%s"`, getStatusDisplayName(*updateReq.Status))
+				models.CreateActionMessage(conversationID, userID, actorName, action)
+			}
+
+			// Priority change action message
+			if updateReq.Priority != nil && *updateReq.Priority != oldPriority {
+				action := fmt.Sprintf(`set priority to "%s"`, getPriorityDisplayName(*updateReq.Priority))
+				models.CreateActionMessage(conversationID, userID, actorName, action)
+			}
+
+			// Bot handling change action message
+			if updateReq.HandleByBot != nil && *updateReq.HandleByBot != oldHandleByBot {
+				var action string
+				if *updateReq.HandleByBot {
+					action = "enabled bot handling"
+				} else {
+					action = "disabled bot handling"
+				}
+				models.CreateActionMessage(conversationID, userID, actorName, action)
+			}
+
+			// Department change action message
+			if updateReq.DepartmentID != nil && (oldDepartmentID == nil || *updateReq.DepartmentID != *oldDepartmentID) {
+				// Get new department name
+				var newDept models.Department
+				if err := db.Where("id = ?", *updateReq.DepartmentID).First(&newDept).Error; err == nil {
+					var action string
+					if oldDepartmentName != "" {
+						action = fmt.Sprintf(`switched department from "%s" to "%s"`, oldDepartmentName, newDept.Name)
+					} else {
+						action = fmt.Sprintf(`set department to "%s"`, newDept.Name)
+					}
+					models.CreateActionMessage(conversationID, userID, actorName, action)
+				}
+			}
+		}()
 	}
 
 	// Reload conversation with relations
@@ -1497,6 +1606,24 @@ func (ac AgentController) UpdateConversationTags(req *evo.Request) interface{} {
 		return response.Error(response.NewErrorWithDetails(response.ErrorCodeNotFound, "Conversation not found", 404, fmt.Sprintf("No conversation exists with ID %d", conversationID)))
 	}
 
+	// Store old tag names for action message
+	oldTagNames := make(map[uint]string)
+	for _, tag := range conversation.Tags {
+		oldTagNames[tag.ID] = tag.Name
+	}
+
+	// Get current user for action messages
+	var actorName string
+	var userID *uuid.UUID
+	if !req.User().Anonymous() {
+		user := req.User().Interface().(*auth.User)
+		actorName = user.Name
+		if user.LastName != "" {
+			actorName = user.Name + " " + user.LastName
+		}
+		userID = &user.UserID
+	}
+
 	// Get tags
 	var tags []models.Tag
 	if len(tagsReq.TagIDs) > 0 {
@@ -1510,6 +1637,40 @@ func (ac AgentController) UpdateConversationTags(req *evo.Request) interface{} {
 		log.Error("Failed to update conversation tags: ", err)
 		return response.Error(response.NewErrorWithDetails(response.ErrorCodeDatabaseError, "Failed to update tags", 500, err.Error()))
 	}
+
+	// Create action messages for tag changes
+	go func() {
+		newTagIDs := make(map[uint]bool)
+		for _, tag := range tags {
+			newTagIDs[tag.ID] = true
+		}
+
+		// Find added tags
+		var addedTags []string
+		for _, tag := range tags {
+			if _, existed := oldTagNames[tag.ID]; !existed {
+				addedTags = append(addedTags, tag.Name)
+			}
+		}
+
+		// Find removed tags
+		var removedTags []string
+		for id, name := range oldTagNames {
+			if !newTagIDs[id] {
+				removedTags = append(removedTags, name)
+			}
+		}
+
+		// Create action messages
+		for _, tagName := range addedTags {
+			action := fmt.Sprintf(`added tag "%s"`, tagName)
+			models.CreateActionMessage(conversationID, userID, actorName, action)
+		}
+		for _, tagName := range removedTags {
+			action := fmt.Sprintf(`removed tag "%s"`, tagName)
+			models.CreateActionMessage(conversationID, userID, actorName, action)
+		}
+	}()
 
 	// Return updated tags
 	var updatedTags []TagInfo
@@ -1552,10 +1713,39 @@ func (ac AgentController) AssignConversation(req *evo.Request) interface{} {
 		return response.Error(response.NewErrorWithDetails(response.ErrorCodeNotFound, "Conversation not found", 404, fmt.Sprintf("No conversation exists with ID %d", conversationID)))
 	}
 
+	// Get old assignments with user names for action messages
+	var oldAssignments []models.ConversationAssignment
+	db.Preload("User").Where("conversation_id = ? AND user_id IS NOT NULL", conversationID).Find(&oldAssignments)
+	oldUserNames := make(map[string]string)
+	for _, a := range oldAssignments {
+		if a.User != nil {
+			name := a.User.Name
+			if a.User.LastName != "" {
+				name = a.User.Name + " " + a.User.LastName
+			}
+			oldUserNames[a.UserID.String()] = name
+		}
+	}
+
+	// Get current user for action messages
+	var actorName string
+	var actorUserID *uuid.UUID
+	if !req.User().Anonymous() {
+		user := req.User().Interface().(*auth.User)
+		actorName = user.Name
+		if user.LastName != "" {
+			actorName = user.Name + " " + user.LastName
+		}
+		actorUserID = &user.UserID
+	}
+
 	// Clear existing assignments
 	if err := db.Where("conversation_id = ?", conversationID).Delete(&models.ConversationAssignment{}).Error; err != nil {
 		return response.Error(response.NewErrorWithDetails(response.ErrorCodeDatabaseError, "Failed to clear assignments", 500, err.Error()))
 	}
+
+	// Collect new user info for action messages
+	newUserNames := make(map[string]string)
 
 	// Assign to users
 	for _, userIDStr := range assignReq.UserIDs {
@@ -1572,6 +1762,16 @@ func (ac AgentController) AssignConversation(req *evo.Request) interface{} {
 			log.Error("Failed to assign user: ", err)
 			return response.Error(response.NewErrorWithDetails(response.ErrorCodeDatabaseError, "Failed to assign user", 500, err.Error()))
 		}
+
+		// Get user name for action message
+		var user auth.User
+		if err := db.Where("id = ?", userID).First(&user).Error; err == nil {
+			name := user.Name
+			if user.LastName != "" {
+				name = user.Name + " " + user.LastName
+			}
+			newUserNames[userIDStr] = name
+		}
 	}
 
 	// Assign to department
@@ -1585,6 +1785,25 @@ func (ac AgentController) AssignConversation(req *evo.Request) interface{} {
 			return response.Error(response.NewErrorWithDetails(response.ErrorCodeDatabaseError, "Failed to assign department", 500, err.Error()))
 		}
 	}
+
+	// Create action messages for assignee changes
+	go func() {
+		// Find added assignees
+		for userIDStr, userName := range newUserNames {
+			if _, existed := oldUserNames[userIDStr]; !existed {
+				action := fmt.Sprintf(`assigned "%s" to the conversation`, userName)
+				models.CreateActionMessage(conversationID, actorUserID, actorName, action)
+			}
+		}
+
+		// Find removed assignees
+		for userIDStr, userName := range oldUserNames {
+			if _, exists := newUserNames[userIDStr]; !exists {
+				action := fmt.Sprintf(`unassigned "%s" from the conversation`, userName)
+				models.CreateActionMessage(conversationID, actorUserID, actorName, action)
+			}
+		}
+	}()
 
 	return response.OK(map[string]interface{}{
 		"conversation_id": conversationID,

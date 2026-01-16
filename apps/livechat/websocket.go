@@ -67,6 +67,21 @@ func HandleWebSocket(c *websocket.Conn) {
 	// Each WebSocket connection subscribes independently and receives all messages
 	subject := fmt.Sprintf("conversation.%d", conversationID)
 	sub, err := nats.Subscribe(subject, func(msg *natsclient.Msg) {
+		// Filter out action messages from client view (they are internal activity logs)
+		var msgData map[string]interface{}
+		if err := json.Unmarshal(msg.Data, &msgData); err == nil {
+			// Only filter message.created events, let other events through
+			if event, ok := msgData["event"].(string); ok && event == "message.created" {
+				// Check if this message has type "action"
+				if message, ok := msgData["message"].(map[string]interface{}); ok {
+					if msgType, ok := message["type"].(string); ok && msgType == "action" {
+						// Skip action messages for clients
+						return
+					}
+				}
+			}
+		}
+
 		// Send NATS message to THIS WebSocket connection only
 		wsConn.mutex.Lock()
 		err := wsConn.conn.WriteMessage(websocket.TextMessage, msg.Data)
