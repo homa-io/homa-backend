@@ -63,29 +63,9 @@ func ProcessIncomingMessage(message *models.Message) error {
 		return nil
 	}
 
-	// 6. Check conversation assignments - AI should only respond if:
-	//    - No human is assigned to the conversation, OR
-	//    - Only the bot is assigned to the conversation
-	var assignments []models.ConversationAssignment
-	if err := db.Preload("User").
-		Where("conversation_id = ?", conversation.ID).
-		Find(&assignments).Error; err != nil {
-		log.Warning("Failed to load conversation assignments: %v", err)
-	}
-
-	// Check if any human agent (non-bot) is assigned
-	botUserID := aiAgent.Bot.UserID.String()
-	for _, assignment := range assignments {
-		if assignment.UserID != nil && assignment.User != nil {
-			assignedUserID := assignment.UserID.String()
-			// If a human agent (not the bot) is assigned, don't respond
-			if assignedUserID != botUserID && assignment.User.Type != "bot" {
-				log.Debug("Human agent %s is assigned to conversation %d, AI agent will not respond",
-					assignment.User.DisplayName, conversation.ID)
-				return nil
-			}
-		}
-	}
+	// 6. Bot responds when handle_by_bot is enabled, regardless of human assignments
+	// The handle_by_bot flag is the explicit indicator that bot should handle this conversation
+	log.Debug("Bot handling enabled for conversation %d, bot will respond", conversation.ID)
 
 	// 7. Load AI agent tools
 	var agentTools []models.AIAgentTool
