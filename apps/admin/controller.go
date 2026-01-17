@@ -133,15 +133,15 @@ func (c Controller) ListTickets(request *evo.Request) any {
 		)
 	}
 
-	// Search functionality
-	search := request.Query("search").String()
+	// Search functionality (sanitized to prevent DoS and injection)
+	search := sanitizeSearch(request.Query("search").String())
 	if search != "" {
 		query = query.Where(
-			"id = ? OR title LIKE ? OR id IN (SELECT conversation_id FROM messages WHERE body LIKE ?) OR "+
-				"client_id IN (SELECT id FROM clients WHERE name LIKE ?) OR "+
-				"client_id IN (SELECT client_id FROM client_external_ids WHERE value LIKE ?) OR "+
-				"id IN (SELECT conversation_id FROM conversation_tags JOIN tags ON conversation_tags.tag_id = tags.id WHERE tags.name LIKE ?)",
-			parseIntOrZero(search), "%"+search+"%", "%"+search+"%", "%"+search+"%", "%"+search+"%", "%"+search+"%",
+			"id = ? OR title LIKE ? ESCAPE '\\' OR id IN (SELECT conversation_id FROM messages WHERE body LIKE ? ESCAPE '\\') OR "+
+				"client_id IN (SELECT id FROM clients WHERE name LIKE ? ESCAPE '\\') OR "+
+				"client_id IN (SELECT client_id FROM client_external_ids WHERE value LIKE ? ESCAPE '\\') OR "+
+				"id IN (SELECT conversation_id FROM conversation_tags JOIN tags ON conversation_tags.tag_id = tags.id WHERE tags.name LIKE ? ESCAPE '\\')",
+			parseIntOrZero(request.Query("search").String()), "%"+search+"%", "%"+search+"%", "%"+search+"%", "%"+search+"%", "%"+search+"%",
 		)
 	}
 
@@ -803,11 +803,11 @@ func (c Controller) ListDepartments(request *evo.Request) any {
 	var departments []models.Department
 	query := db.Model(&models.Department{}).Preload("Users").Preload("AIAgent")
 
-	// Search functionality
-	search := request.Query("search").String()
+	// Search functionality (sanitized)
+	search := sanitizeSearch(request.Query("search").String())
 	if search != "" {
-		query = query.Where("id = ? OR name LIKE ? OR description LIKE ?",
-			parseIntOrZero(search), "%"+search+"%", "%"+search+"%")
+		query = query.Where("id = ? OR name LIKE ? ESCAPE '\\' OR description LIKE ? ESCAPE '\\'",
+			parseIntOrZero(request.Query("search").String()), "%"+search+"%", "%"+search+"%")
 	}
 
 	// Filter by status
@@ -1155,11 +1155,11 @@ func (c Controller) ListUsers(request *evo.Request) any {
 	var users []auth.User
 	query := db.Model(&auth.User{}).Select("id, name, last_name, display_name, email, type, status, avatar, created_at, updated_at")
 
-	// Search functionality
-	search := request.Query("search").String()
+	// Search functionality (sanitized)
+	search := sanitizeSearch(request.Query("search").String())
 	if search != "" {
 		query = query.Where(
-			"name LIKE ? OR last_name LIKE ? OR display_name LIKE ? OR email LIKE ? OR type LIKE ?",
+			"name LIKE ? ESCAPE '\\' OR last_name LIKE ? ESCAPE '\\' OR display_name LIKE ? ESCAPE '\\' OR email LIKE ? ESCAPE '\\' OR type LIKE ? ESCAPE '\\'",
 			"%"+search+"%", "%"+search+"%", "%"+search+"%", "%"+search+"%", "%"+search+"%",
 		)
 	}
@@ -1462,10 +1462,10 @@ func (c Controller) ListCustomAttributes(request *evo.Request) any {
 	var customAttrs []models.CustomAttribute
 	query := db.Model(&models.CustomAttribute{})
 
-	// Search functionality
-	search := request.Query("search").String()
+	// Search functionality (sanitized)
+	search := sanitizeSearch(request.Query("search").String())
 	if search != "" {
-		query = query.Where("name LIKE ? OR title LIKE ? OR description LIKE ?",
+		query = query.Where("name LIKE ? ESCAPE '\\' OR title LIKE ? ESCAPE '\\' OR description LIKE ? ESCAPE '\\'",
 			"%"+search+"%", "%"+search+"%", "%"+search+"%")
 	}
 
@@ -1675,10 +1675,10 @@ func (c Controller) ListChannels(request *evo.Request) any {
 	var channels []models.Channel
 	query := db.Model(&models.Channel{})
 
-	// Search functionality
-	search := request.Query("search").String()
+	// Search functionality (sanitized)
+	search := sanitizeSearch(request.Query("search").String())
 	if search != "" {
-		query = query.Where("id LIKE ? OR name LIKE ?", "%"+search+"%", "%"+search+"%")
+		query = query.Where("id LIKE ? ESCAPE '\\' OR name LIKE ? ESCAPE '\\'", "%"+search+"%", "%"+search+"%")
 	}
 
 	// Filter by enabled status
@@ -1723,6 +1723,22 @@ func parseIntOrZero(s string) int {
 		return i
 	}
 	return 0
+}
+
+// sanitizeSearch validates and sanitizes search input to prevent DoS and injection
+// - Trims whitespace
+// - Limits to 100 characters
+// - Escapes SQL LIKE wildcards
+func sanitizeSearch(s string) string {
+	s = strings.TrimSpace(s)
+	if len(s) > 100 {
+		s = s[:100]
+	}
+	// Escape SQL LIKE wildcards to treat them as literals
+	s = strings.ReplaceAll(s, "\\", "\\\\")
+	s = strings.ReplaceAll(s, "%", "\\%")
+	s = strings.ReplaceAll(s, "_", "\\_")
+	return s
 }
 
 func (c Controller) hasTicketAccess(user *auth.User, ticketID uint) bool {
