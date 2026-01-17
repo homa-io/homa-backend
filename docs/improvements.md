@@ -1,40 +1,222 @@
 # Project Improvements Analysis
 
 **Date:** January 17, 2026
+**Last Updated:** January 17, 2026
 **Scope:** Full codebase analysis of backend (Go) and dashboard (Next.js)
+
+---
+
+## Progress Summary
+
+| Category | Total Issues | Fixed | Remaining |
+|----------|-------------|-------|-----------|
+| Security (Critical) | 6 | 4 | 2 |
+| Code Duplication | 3 | 3 | 0 |
+| Performance | 3 | 2 | 1 |
+| Code Quality | 4 | 3 | 1 |
+| Large Files | 13 | 0 | 13 |
+| Missing Features | 7 | 0 | 7 |
 
 ---
 
 ## Table of Contents
 
-1. [Backend (Go) Analysis](#backend-go-analysis)
-   - [Security Issues](#1-security-issues---critical)
-   - [Large Files to Split](#2-large-files-to-split)
-   - [Code Duplication](#3-code-duplication)
-   - [Performance Issues](#4-performance-issues)
-   - [Incomplete Features](#5-incomplete-features)
-2. [Dashboard (Next.js) Analysis](#dashboard-nextjs-analysis)
-   - [Security Issues](#1-security-issues)
-   - [Large Components to Split](#2-large-components-to-split)
-   - [Code Quality Issues](#3-code-quality-issues)
-   - [Performance Issues](#4-performance-issues-1)
-   - [Missing Features](#5-missing-features)
-3. [Priority Matrix](#priority-matrix)
-4. [Action Plan](#action-plan)
+1. [Completed Fixes](#completed-fixes)
+2. [Remaining Issues](#remaining-issues)
+3. [Feature Suggestions](#feature-suggestions)
+4. [Backend Analysis](#backend-go-analysis)
+5. [Dashboard Analysis](#dashboard-nextjs-analysis)
+6. [Priority Matrix](#priority-matrix)
+7. [Action Plan](#action-plan)
 
 ---
 
-## Backend (Go) Analysis
+## Completed Fixes
 
-**Total Files:** 118
-**Total Lines:** 31,252
-**Framework:** Evo v2 with GORM ORM
+### Backend (Go)
 
-### 1. Security Issues - CRITICAL
+#### 1. Input Validation - FIXED (Commit: 0b0d4ef)
 
-#### A. Missing Encryption for Integration Configs
+**File:** `apps/admin/controller.go`
+
+Added `sanitizeSearch()` helper function that:
+- Limits search input to 100 characters
+- Escapes SQL special characters (`\`, `%`, `_`)
+- Added `ESCAPE '\\'` clause to all LIKE queries
+- Applied to all 5 search endpoints
+
+```go
+// sanitizeSearch validates and sanitizes search input to prevent DoS and injection
+func sanitizeSearch(s string) string {
+    s = strings.TrimSpace(s)
+    if len(s) > 100 {
+        s = s[:100]
+    }
+    s = strings.ReplaceAll(s, "\\", "\\\\")
+    s = strings.ReplaceAll(s, "%", "\\%")
+    s = strings.ReplaceAll(s, "_", "\\_")
+    return s
+}
+```
+
+#### 2. Access Control Logic Duplication - FIXED (Commit: 92a84a6)
+
+**File:** `apps/admin/controller.go`
+
+Extracted duplicate access control logic into `getAgentDepartments()` helper:
+
+```go
+// getAgentDepartments returns the department IDs assigned to an agent
+func getAgentDepartments(userID uuid.UUID) ([]uint, error) {
+    var departments []uint
+    err := db.Model(&models.UserDepartment{}).
+        Where("user_id = ?", userID).
+        Pluck("department_id", &departments).Error
+    return departments, err
+}
+```
+
+Replaced 3 duplicate blocks with helper function calls.
+
+#### 3. Duplicate Error Handling Pattern - FIXED (Commit: 92a84a6)
+
+**File:** `apps/admin/controller.go`
+
+Created `isDuplicateError()` helper to simplify duplicate constraint checking:
+
+```go
+// isDuplicateError checks if an error is a duplicate/unique constraint violation
+func isDuplicateError(err error) bool {
+    return err != nil && (strings.Contains(err.Error(), "duplicate") || strings.Contains(err.Error(), "unique"))
+}
+```
+
+Simplified 7 duplicate error handling patterns.
+
+#### 4. N+1 Query Problems - FIXED (Commit: 92a84a6)
+
+**File:** `apps/conversation/agent_controller.go`
+
+- Fixed GetTags N+1 query with single JOIN query
+- Optimized GetConversations using `Joins()` for 1-to-1 relationships
+- Added conditional preloads with limits for 1-to-many relationships
+
+```go
+// Before: N+1 queries for each conversation
+// After: Single JOIN query
+if err := query.
+    Joins("Client").
+    Joins("Department").
+    Joins("Channel").
+    Preload("Tags").
+    Preload("Assignments", func(db *gorm.DB) *gorm.DB {
+        return db.Order("priority ASC").Limit(10)
+    }).
+    Preload("Assignments.User").
+    Find(&conversations).Error; err != nil {
+```
+
+#### 5. Ignored Database Errors - FIXED (Commit: d287319)
+
+**File:** `apps/admin/controller.go`
+
+Fixed 3 `db.Create(&message)` calls that were ignoring errors:
+- Line 229: Message creation in ticket resolution
+- Line 369: Message creation in ticket assignment
+- Line 422: Message creation in ticket close
+
+Added proper error logging for all cases.
+
+#### 6. Transaction Safety - FIXED (Commit: d287319)
+
+**File:** `apps/admin/controller.go`
+
+Improved 4 transaction blocks with:
+- `tx.Error` check after `db.Begin()`
+- `defer` with panic recovery
+- `tx.Commit().Error` check
+
+```go
+tx := db.Begin()
+if tx.Error != nil {
+    log.Error("Failed to start transaction: %v", tx.Error)
+    return response.Error(response.ErrInternalError)
+}
+defer func() {
+    if r := recover(); r != nil {
+        tx.Rollback()
+        panic(r)
+    }
+}()
+// ... operations ...
+if err = tx.Commit().Error; err != nil {
+    log.Error("Failed to commit transaction: %v", err)
+    return response.Error(response.ErrInternalError)
+}
+```
+
+---
+
+### Dashboard (Next.js)
+
+#### 1. XSS Vulnerability - FIXED (Commit: 8e68398)
+
+**File:** `src/components/knowledge-base/ArticleEditor.tsx`
+
+Added DOMPurify sanitization:
+
+```typescript
+import DOMPurify from "dompurify"
+
+dangerouslySetInnerHTML={{
+    __html: DOMPurify.sanitize(editor?.getHTML() || '<p>No content yet...</p>')
+}}
+```
+
+#### 2. Weak Password Generation - FIXED (Commit: 8e68398)
+
+**File:** `src/services/users.ts`
+
+Replaced insecure `Math.random()` with cryptographically secure generation:
+
+```typescript
+function generateSecureRandomString(length: number): string {
+  const charset = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
+  const randomValues = new Uint8Array(length);
+  crypto.getRandomValues(randomValues);
+  return Array.from(randomValues, (byte) => charset[byte % charset.length]).join('');
+}
+```
+
+#### 3. Dead Code Removed - FIXED (Commit: 8e68398)
+
+Deleted `src/data/mockKnowledgeBase.working.ts` (344 lines of unused code).
+
+Updated imports in 3 knowledge-base pages to use correct module path.
+
+#### 4. Duplicate Token Logic - FIXED (Commit: 8e68398)
+
+**File:** `src/services/conversation.service.ts`
+
+Refactored to use centralized `getAccessToken()` from `@/lib/cookies`:
+
+```typescript
+import { getAccessToken } from '@/lib/cookies'
+// Replaced 4 duplicate implementations with single import
+const token = getAccessToken()
+```
+
+---
+
+## Remaining Issues
+
+### Backend - Critical
+
+#### 1. Missing Encryption for Integration Configs
 
 **File:** `apps/integrations/driver.go` lines 120-129
+
+**Status:** NOT FIXED - High Priority
 
 ```go
 // EncryptConfig encrypts configuration JSON (placeholder - implement proper encryption).
@@ -46,7 +228,7 @@ func EncryptConfig(config string) string {
 
 **Risk:** API keys, tokens, and secrets for Gmail, Outlook, Slack, WhatsApp, Telegram stored in plain text.
 
-**Fix Required:**
+**Required Fix:**
 ```go
 func EncryptConfig(config string) (string, error) {
     key := []byte(os.Getenv("ENCRYPTION_KEY"))
@@ -65,167 +247,33 @@ func EncryptConfig(config string) (string, error) {
 }
 ```
 
-#### B. Input Validation Gaps
-
-**File:** `apps/admin/controller.go` lines 137-144
-
-```go
-search := request.Query("search").String()
-if search != "" {
-    query = query.Where("title LIKE ?", "%"+search+"%")
-}
-```
-
-**Issues:**
-- No max length validation (DoS risk with very long strings)
-- No sanitization of special characters
-- 6 subqueries with unvalidated input
-
-**Fix:** Add validation before use:
-```go
-if len(search) > 100 {
-    return response.Error(response.ErrInvalidInput)
-}
-search = strings.TrimSpace(search)
-```
-
-#### C. API Key Management
+#### 2. API Key Management
 
 **File:** `apps/admin/controller.go` lines 1304-1318
 
+**Status:** NOT FIXED - Medium Priority
+
+Issues:
 - Blocking user doesn't revoke existing tokens
 - No API key expiration mechanism
 - No per-key rate limiting
 
 ---
 
-### 2. Large Files to Split
+### Backend - Large Files to Split
 
-| File | Lines | Priority | Recommendation |
-|------|-------|----------|----------------|
-| `conversation/agent_controller.go` | 3036 | HIGH | Split into `conversation_repository.go`, `conversation_search.go`, `conversation_formatter.go` |
-| `swagger/generator.go` | 1930 | MEDIUM | Split into `openapi_schemas.go`, `openapi_paths.go`, `openapi_generators.go` |
-| `admin/controller.go` | 1765 | HIGH | Split by domain: `ticket_controller.go`, `department_controller.go`, `user_controller.go`, `attribute_controller.go`, `channel_controller.go` |
-| `integrations/webhooks.go` | 1016 | MEDIUM | Split by channel: `handlers/slack.go`, `handlers/gmail.go`, `handlers/whatsapp.go` |
-
----
-
-### 3. Code Duplication
-
-#### A. Access Control Logic (3 occurrences)
-
-**Locations:** `apps/admin/controller.go` lines 30-53, 72-92, 106-115
-
-```go
-// Repeated in GetUnreadTickets, GetUnreadTicketsCount, ListTickets
-var userDepartments []uint
-err := db.Model(&models.UserDepartment{}).
-    Where("user_id = ?", user.UserID).
-    Pluck("department_id", &userDepartments).Error
-```
-
-**Fix:** Extract to helper function:
-```go
-func (c *AdminController) getAgentDepartments(userID uuid.UUID) ([]uint, error) {
-    var departments []uint
-    err := c.db.Model(&models.UserDepartment{}).
-        Where("user_id = ?", userID).
-        Pluck("department_id", &departments).Error
-    return departments, err
-}
-```
-
-#### B. Duplicate Error Handling Pattern
-
-**Locations:** Lines 648-651, 728-731, 929-931, 1004-1005
-
-```go
-if strings.Contains(err.Error(), "duplicate") || strings.Contains(err.Error(), "unique") {
-    duplicateErr := response.NewError(response.ErrorCodeConflict, "...", 409)
-    return response.Error(duplicateErr)
-}
-```
-
-**Fix:** Create `handleDuplicateError()` helper.
-
-#### C. Ticket Access Verification
-
-Already implemented as `hasTicketAccess()` at line 1728 but not consistently used across all ticket operations.
+| File | Lines | Priority | Status |
+|------|-------|----------|--------|
+| `conversation/agent_controller.go` | 3,034 | HIGH | NOT STARTED |
+| `swagger/generator.go` | 1,930 | MEDIUM | NOT STARTED |
+| `admin/controller.go` | 1,765 | HIGH | NOT STARTED |
+| `integrations/webhooks.go` | 1,016 | MEDIUM | NOT STARTED |
 
 ---
 
-### 4. Performance Issues
+### Backend - Incomplete Features
 
-#### A. N+1 Query Problems
-
-**File:** `conversation/agent_controller.go` lines 654-675
-
-```go
-db.Preload("Client").
-    Preload("Department").
-    Preload("Channel").
-    Preload("Assignments").
-    Preload("Assignments.User").
-    // Many more preloads...
-    Find(&conversations)
-```
-
-**Issues:**
-- Excessive preload chains without conditions
-- No JOIN optimization
-- Each preload generates separate query
-
-**Fix:** Use conditional preloads and JOINs:
-```go
-db.Joins("Client").
-    Joins("Department").
-    Preload("Assignments", func(db *gorm.DB) *gorm.DB {
-        return db.Limit(10)
-    }).
-    Find(&conversations)
-```
-
-#### B. Inefficient Search
-
-**File:** `apps/admin/controller.go` lines 139-145
-
-```go
-query = query.Where(
-    "id = ? OR title LIKE ? OR id IN (SELECT conversation_id FROM messages WHERE body LIKE ?) OR "+
-    "client_id IN (SELECT id FROM clients WHERE name LIKE ?) OR "+
-    "client_id IN (SELECT client_id FROM client_external_ids WHERE value LIKE ?) OR "+
-    "id IN (SELECT conversation_id FROM conversation_tags JOIN tags ON ... WHERE tags.name LIKE ?)",
-    parseIntOrZero(search), "%"+search+"%", "%"+search+"%", "%"+search+"%", "%"+search+"%", "%"+search+"%",
-)
-```
-
-**Issues:**
-- 6 separate subqueries
-- `LIKE "%search%"` cannot use indexes
-- No result limit on subqueries
-
-**Fix:** Implement full-text search:
-```go
-// PostgreSQL example
-query = query.Where("search_vector @@ plainto_tsquery(?)", search)
-```
-
-#### C. Missing Database Indexes
-
-Add composite indexes for frequently used queries:
-
-```go
-// In migration
-db.Exec("CREATE INDEX idx_messages_conv_created ON messages(conversation_id, created_at)")
-db.Exec("CREATE INDEX idx_conversations_dept_status ON conversations(department_id, status)")
-db.Exec("CREATE INDEX idx_assignments_user_dept ON conversation_assignments(user_id, department_id)")
-```
-
----
-
-### 5. Incomplete Features
-
-#### A. TODO Jobs Not Implemented
+#### TODO Jobs Not Implemented
 
 **File:** `apps/jobs/jobs.go` lines 90-182
 
@@ -237,212 +285,180 @@ db.Exec("CREATE INDEX idx_assignments_user_dept ON conversation_assignments(user
 | `handleArchiveOldTickets` | 141 | TODO |
 | `handleDeleteOldTickets` | 154 | TODO |
 
-#### B. Ignored Database Errors
-
-**File:** `apps/admin/controller.go`
-
-```go
-db.Create(&message)  // Line 229 - error ignored
-db.Create(&message)  // Line 369 - error ignored
-db.Create(&message)  // Line 422 - error ignored
-```
-
-**Fix:** Always handle errors:
-```go
-if err := db.Create(&message).Error; err != nil {
-    log.Error("Failed to create message: %v", err)
-    return response.Error(response.ErrDatabaseOperation)
-}
-```
-
-#### C. Resource Cleanup
-
-Found 26 manual cleanup statements without `defer`. Potential resource leaks in error paths.
-
 ---
 
-## Dashboard (Next.js) Analysis
+### Dashboard - Remaining Issues
 
-**Total Components:** 200+
-**Framework:** Next.js 13+ with App Router
+#### 1. ESLint Errors (3 errors)
 
-### 1. Security Issues
+**File:** `src/components/knowledge-base/ArticleEditor.tsx`
 
-#### A. XSS Vulnerability
-
-**File:** `src/components/knowledge-base/ArticleEditor.tsx` line 1100
-
-```typescript
-dangerouslySetInnerHTML={{
-  __html: editor?.getHTML() || '<p>No content yet...</p>'
-}}
+```
+Line 12:3  'ImageIcon' redeclares variable from line 8
+Line 15:3  'Settings' redeclares variable from line 10
+Line 16:3  'Tag' redeclares variable from line 11
 ```
 
-**Risk:** If editor content contains malicious HTML, it could execute scripts.
+**Fix:** Rename imported icons to avoid conflicts with tiptap extension names.
 
-**Fix:** Sanitize with DOMPurify:
-```typescript
-import DOMPurify from 'dompurify'
+#### 2. Type Safety Issues (65 `any` instances)
 
-dangerouslySetInnerHTML={{
-  __html: DOMPurify.sanitize(editor?.getHTML() || '<p>No content yet...</p>')
-}}
-```
+Remaining `any` type usages that should be properly typed.
 
-#### B. Weak Password Generation
+#### 3. Large Components to Split
 
-**File:** `src/services/users.ts`
+| Component | Lines | Priority | Status |
+|-----------|-------|----------|--------|
+| `ArticleEditor.tsx` | 1,139 | HIGH | NOT STARTED |
+| `SDKSettings.tsx` | 1,066 | HIGH | NOT STARTED |
+| `VisitorInformation.tsx` | 833 | MEDIUM | NOT STARTED |
+| `AIAgentEditPage.tsx` | 814 | MEDIUM | NOT STARTED |
+| `WysiwygEditor.tsx` | 796 | MEDIUM | NOT STARTED |
+| `RAGSettings.tsx` | 751 | MEDIUM | NOT STARTED |
+| `ConversationModal.tsx` | 669 | LOW | NOT STARTED |
+| `users/index.tsx` | 649 | LOW | NOT STARTED |
+| `AttributeManager.tsx` | 612 | LOW | NOT STARTED |
 
-```typescript
-password: Math.random().toString(36).substring(2, 18) + Math.random().toString(36).substring(2, 18)
-```
+#### 4. Missing Error Boundaries
 
-**Risk:** `Math.random()` is NOT cryptographically secure.
+**File:** `app/` directory
 
-**Fix:**
-```typescript
-import { randomBytes } from 'crypto'
-const password = randomBytes(16).toString('base64')
-```
+**Status:** 0% coverage
 
----
-
-### 2. Large Components to Split
-
-| Component | Lines | Split Recommendation |
-|-----------|-------|---------------------|
-| `ArticleEditor.tsx` | 1138 | `ArticleEditor` (container), `ArticleForm` (metadata), `ArticleContent` (editor), `MediaGallery`, `FeaturedImageUpload` |
-| `SDKSettings.tsx` | 1066 | `SDKSettingsForm`, `SDKPreview`, `SDKColorPicker`, `SDKPositionSelector` |
-| `VisitorInformation.tsx` | 833 | `VisitorDetails`, `VisitorHistory`, `PreviousConversations` |
-| `AIAgentEditPage.tsx` | 814 | `AIAgentForm`, `ToolsManager`, `AgentValidation` |
-| `WysiwygEditor.tsx` | 796 | `EditorToolbar`, `EditorContent`, `AIFeatures`, `SlashCommandMenu` |
-| `RAGSettings.tsx` | 751 | `RAGDocuments`, `RAGConfiguration`, `RAGStatus` |
-| `ConversationModal.tsx` | 669 | `ModalHeader`, `ModalContent`, `ModalActions` |
-| `users/index.tsx` | 649 | `UserList`, `UserFilters`, `UserActions` |
-| `AttributeManager.tsx` | 612 | `AttributeList`, `AttributeForm`, `AttributePreview` |
-
----
-
-### 3. Code Quality Issues
-
-#### A. Type Safety (162 `any` instances)
-
-**Common patterns:**
-```typescript
-error: any      // Should be: error: Error | AxiosError
-data: any       // Should be: data: ConversationResponse
-response: any   // Should be: response: APIResponse<T>
-```
-
-**Fix:** Create proper interfaces:
-```typescript
-interface APIResponse<T> {
-  success: boolean
-  data: T
-  error?: string
-}
-
-interface ConversationMessage {
-  id: number
-  body: string
-  type: 'message' | 'action'
-  language: string
-  // ...
-}
-```
-
-#### B. Duplicate Token Logic
-
-**File:** `src/services/conversation.service.ts` (4 instances)
-
-```typescript
-// Repeated pattern instead of using centralized utility
-const cookies = document.cookie.split('; ')
-const tokenCookie = cookies.find(c => c.startsWith('access_token='))
-const token = tokenCookie ? tokenCookie.split('=')[1] : null
-```
-
-**Fix:** Use existing utility:
-```typescript
-import { getAccessToken } from '@/lib/cookies'
-const token = getAccessToken()
-```
-
-#### C. Dead Code
-
-**File:** `src/data/mockKnowledgeBase.working.ts` (344 lines)
-
-Not imported anywhere in codebase. Delete this file.
-
----
-
-### 4. Performance Issues
-
-#### A. Missing Memoization
-
-**WysiwygEditor.tsx:** 15+ useState hooks in one component without proper memoization.
-
-```typescript
-// EditorToolbar rendered on every keystroke
-// Should wrap with React.memo():
-const EditorToolbar = React.memo(({ editor, onAction }) => {
-  // ...
-})
-```
-
-#### B. Missing Code Splitting
-
-Heavy dependencies loaded eagerly:
-- `@tiptap/*` (7 extensions)
-- `vanta` + `three`
-- `recharts`
-- `@uppy/*`
-
-**Fix:** Dynamic imports:
-```typescript
-const ArticleEditor = dynamic(
-  () => import('@/components/knowledge-base/ArticleEditor'),
-  { loading: () => <EditorSkeleton /> }
-)
-```
-
----
-
-### 5. Missing Features
-
-#### A. Testing (0 test files)
-
-No unit tests, integration tests, or component tests found.
-
-**Priority test targets:**
-- `conversation.service.ts` - critical business logic
-- `ArticleEditor.tsx` - complex user interactions
-- `auth` utilities - security critical
-
-#### B. Accessibility (28 ARIA attributes total)
-
-Missing:
-- Keyboard navigation
-- Screen reader support
-- Focus management in modals
-- Color contrast verification
-
-**Fix:** Add ARIA attributes to interactive elements:
-```typescript
-<Dialog
-  aria-modal="true"
-  aria-labelledby="dialog-title"
-  aria-describedby="dialog-description"
->
-```
-
-#### C. Error Boundaries
-
-Only one error boundary exists. Add boundaries for:
+Need error boundaries for:
 - Conversations section
 - Settings pages
 - Knowledge Base editor
 - File upload operations
+
+#### 5. Missing Tests
+
+**Status:** 0 test files found
+
+Priority test targets:
+- `conversation.service.ts` - critical business logic
+- `ArticleEditor.tsx` - complex user interactions
+- Auth utilities - security critical
+
+---
+
+## Feature Suggestions
+
+### High Priority Features
+
+#### 1. Full-Text Search
+
+Replace current LIKE-based search with PostgreSQL full-text search:
+
+```go
+// Current: Slow LIKE queries with subqueries
+query = query.Where("title LIKE ?", "%"+search+"%")
+
+// Suggested: Full-text search
+query = query.Where("search_vector @@ plainto_tsquery(?)", search)
+```
+
+Benefits:
+- 10-100x faster search performance
+- Better relevance ranking
+- Support for stemming and fuzzy matching
+
+#### 2. Webhook Retry Mechanism
+
+**File:** `apps/integrations/webhooks.go`
+
+Current behavior: Single attempt, no retry on failure.
+
+Suggested implementation:
+- Exponential backoff (1s, 2s, 4s, 8s, 16s)
+- Max 5 retry attempts
+- Dead letter queue for failed webhooks
+- Webhook status dashboard
+
+#### 3. Rate Limiting per API Key
+
+**File:** `apps/admin/controller.go`
+
+Current: No rate limiting on API endpoints.
+
+Suggested:
+- Redis-based sliding window rate limiter
+- Per-key limits stored in database
+- Rate limit headers in responses
+- Automatic temporary blocks
+
+#### 4. Real-Time Notifications (WebSocket)
+
+Currently implemented but could be enhanced:
+- Browser notifications for new messages
+- Sound notifications (configurable)
+- Desktop notification badges
+- Unread count sync across tabs
+
+#### 5. Analytics Dashboard
+
+Missing analytics features:
+- Response time metrics
+- Agent performance metrics
+- Channel usage statistics
+- Customer satisfaction trends
+- Peak hour analysis
+
+### Medium Priority Features
+
+#### 6. Bulk Operations
+
+- Bulk ticket assignment
+- Bulk status change
+- Bulk tag application
+- Bulk export (CSV/Excel)
+
+#### 7. Canned Responses
+
+- Pre-defined response templates
+- Category organization
+- Variable substitution ({{customer_name}})
+- Usage analytics
+
+#### 8. SLA Management
+
+- SLA policy definition
+- First response time targets
+- Resolution time targets
+- Escalation rules
+- SLA breach notifications
+
+#### 9. Knowledge Base Enhancements
+
+- Article versioning
+- Draft autosave
+- Collaborative editing
+- Article analytics
+- Search suggestions
+
+#### 10. Integration Marketplace
+
+- Pre-built integrations catalog
+- One-click installation
+- Configuration wizard
+- Health monitoring
+
+### Low Priority Features
+
+#### 11. Dark Mode
+
+Dashboard currently lacks dark mode support.
+
+#### 12. Mobile App
+
+Progressive Web App (PWA) for mobile agents.
+
+#### 13. AI Enhancements
+
+- Sentiment analysis on conversations
+- Auto-categorization of tickets
+- Suggested responses
+- Smart routing based on content
 
 ---
 
@@ -450,75 +466,87 @@ Only one error boundary exists. Add boundaries for:
 
 ### Critical (Do First)
 
-| Task | Project | Effort | Impact |
+| Task | Project | Status | Effort |
 |------|---------|--------|--------|
-| Implement config encryption | Backend | Medium | Security |
-| Sanitize HTML output | Dashboard | Low | Security |
-| Fix password generation | Dashboard | Low | Security |
-| Add input validation | Backend | Low | Security |
+| ~~Sanitize HTML output~~ | Dashboard | DONE | Low |
+| ~~Fix password generation~~ | Dashboard | DONE | Low |
+| ~~Add input validation~~ | Backend | DONE | Low |
+| Implement config encryption | Backend | TODO | Medium |
 
 ### High Priority
 
-| Task | Project | Effort | Impact |
+| Task | Project | Status | Effort |
 |------|---------|--------|--------|
-| Split `agent_controller.go` | Backend | High | Maintainability |
-| Split `ArticleEditor.tsx` | Dashboard | High | Maintainability |
-| Split `SDKSettings.tsx` | Dashboard | High | Maintainability |
-| Fix N+1 queries | Backend | Medium | Performance |
-| Add database indexes | Backend | Low | Performance |
+| ~~Fix N+1 queries~~ | Backend | DONE | Medium |
+| ~~Extract duplicate code~~ | Backend | DONE | Medium |
+| ~~Refactor token logic~~ | Dashboard | DONE | Low |
+| Split `agent_controller.go` | Backend | TODO | High |
+| Split `ArticleEditor.tsx` | Dashboard | TODO | High |
+| Fix ESLint errors | Dashboard | TODO | Low |
 
 ### Medium Priority
 
-| Task | Project | Effort | Impact |
+| Task | Project | Status | Effort |
 |------|---------|--------|--------|
-| Extract duplicate code | Backend | Medium | Maintainability |
-| Refactor token logic | Dashboard | Low | Code Quality |
-| Add TypeScript interfaces | Dashboard | Medium | Type Safety |
-| Implement error handling | Backend | Medium | Reliability |
+| Implement TODO jobs | Backend | TODO | High |
+| Add database indexes | Backend | TODO | Low |
+| Add TypeScript interfaces | Dashboard | TODO | Medium |
+| Add error boundaries | Dashboard | TODO | Medium |
 
 ### Low Priority
 
-| Task | Project | Effort | Impact |
+| Task | Project | Status | Effort |
 |------|---------|--------|--------|
-| Add unit tests | Both | High | Quality |
-| Improve accessibility | Dashboard | Medium | UX |
-| Add documentation | Both | Medium | Maintainability |
-| Delete dead code | Dashboard | Low | Cleanup |
+| Add unit tests | Both | TODO | High |
+| Improve accessibility | Dashboard | TODO | Medium |
+| Add documentation | Both | TODO | Medium |
+| Split remaining large files | Both | TODO | High |
 
 ---
 
 ## Action Plan
 
-### Week 1: Security Fixes
-1. [ ] Implement AES-256-GCM encryption for integration configs
-2. [ ] Add DOMPurify sanitization to ArticleEditor and WysiwygEditor
-3. [ ] Replace Math.random() with crypto module for password generation
-4. [ ] Add input validation for search queries
+### Phase 1: Security (Immediate)
+- [x] Add input validation for search queries
+- [x] Add DOMPurify sanitization to ArticleEditor
+- [x] Replace Math.random() with crypto module
+- [ ] Implement AES-256-GCM encryption for integration configs
 
-### Week 2: Code Splitting (Backend)
-1. [ ] Split `agent_controller.go` into modules
-2. [ ] Extract duplicate access control logic
-3. [ ] Implement consistent error handling
+### Phase 2: Code Quality (Next)
+- [x] Extract duplicate access control logic
+- [x] Implement consistent error handling helpers
+- [x] Fix ignored database errors
+- [x] Add transaction safety
+- [x] Refactor token logic to use centralized utility
+- [x] Remove dead code
+- [ ] Fix ESLint errors in ArticleEditor
+- [ ] Replace remaining `any` types
 
-### Week 3: Code Splitting (Dashboard)
-1. [ ] Split `ArticleEditor.tsx` into smaller components
-2. [ ] Split `SDKSettings.tsx` into sections
-3. [ ] Refactor conversation.service.ts to use centralized auth
+### Phase 3: Performance
+- [x] Optimize N+1 queries with JOINs
+- [ ] Add database composite indexes
+- [ ] Implement code splitting for heavy components
+- [ ] Add React.memo() to frequently rendered components
 
-### Week 4: Performance
-1. [ ] Add database composite indexes
-2. [ ] Optimize N+1 queries with JOINs
-3. [ ] Implement code splitting for heavy components
-4. [ ] Add React.memo() to frequently rendered components
+### Phase 4: Code Splitting
+- [ ] Split `agent_controller.go` into modules
+- [ ] Split `ArticleEditor.tsx` into smaller components
+- [ ] Split `SDKSettings.tsx` into sections
+
+### Phase 5: Features
+- [ ] Implement TODO jobs (CSAT, metrics, cleanup)
+- [ ] Add full-text search
+- [ ] Add error boundaries
+- [ ] Add unit tests for critical paths
 
 ### Ongoing
-- Add unit tests for new code
 - Improve accessibility incrementally
 - Document API endpoints and component props
+- Monitor performance metrics
 
 ---
 
-## Appendix: Commands
+## Appendix: Useful Commands
 
 ### Find Large Files (Backend)
 ```bash
@@ -538,4 +566,15 @@ grep -r ": any" src --include="*.ts" --include="*.tsx" | wc -l
 ### Find Missing Error Handling
 ```bash
 grep -rn "db.Create\|db.Save\|db.Delete" apps --include="*.go" | grep -v "Error"
+```
+
+### Check ESLint Errors
+```bash
+cd /home/evo/homa-dashboard && npm run lint
+```
+
+### Verify Build
+```bash
+cd /home/evo/homa-backend && go build ./...
+cd /home/evo/homa-dashboard && npm run build
 ```
