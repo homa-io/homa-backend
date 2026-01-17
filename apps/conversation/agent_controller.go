@@ -16,6 +16,7 @@ import (
 	"github.com/iesreza/homa-backend/lib/imageutil"
 	"github.com/iesreza/homa-backend/lib/response"
 	"gorm.io/datatypes"
+	"gorm.io/gorm"
 )
 
 type AgentController struct{}
@@ -257,14 +258,17 @@ func (ac AgentController) SearchConversations(req *evo.Request) interface{} {
 	}
 
 	// Get conversations with relations
+	// Use Joins for 1-to-1 relationships (single query) and Preload for collections
 	var conversations []models.Conversation
 	if err := query.
-		Preload("Client").
+		Joins("Client").
+		Joins("Department").
+		Joins("Channel").
 		Preload("Client.ExternalIDs").
-		Preload("Department").
-		Preload("Channel").
 		Preload("Tags").
-		Preload("Assignments").
+		Preload("Assignments", func(db *gorm.DB) *gorm.DB {
+			return db.Order("priority ASC").Limit(10) // Limit assignments per conversation
+		}).
 		Preload("Assignments.User").
 		Limit(limit).
 		Offset(offset).
@@ -690,12 +694,6 @@ func (ac AgentController) GetUsers(req *evo.Request) interface{} {
 // @Success 200 {object} []TagWithUsage
 // @Router /api/agent/tags [get]
 func (ac AgentController) GetTags(req *evo.Request) interface{} {
-	var tags []models.Tag
-	if err := db.Find(&tags).Error; err != nil {
-		log.Error("Failed to get tags:", err)
-		return response.Error(response.NewErrorWithDetails(response.ErrorCodeDatabaseError, "Failed to get tags", 500, err.Error()))
-	}
-
 	type TagWithUsage struct {
 		ID         uint   `json:"id"`
 		Name       string `json:"name"`
@@ -703,17 +701,17 @@ func (ac AgentController) GetTags(req *evo.Request) interface{} {
 		UsageCount int64  `json:"usage_count"`
 	}
 
-	result := make([]TagWithUsage, 0, len(tags))
-	for _, tag := range tags {
-		var usageCount int64
-		db.Model(&models.ConversationTag{}).Where("tag_id = ?", tag.ID).Count(&usageCount)
-
-		result = append(result, TagWithUsage{
-			ID:         tag.ID,
-			Name:       tag.Name,
-			Color:      "#4ECDC4", // Default color since tags table doesn't have color field
-			UsageCount: usageCount,
-		})
+	// Single query with LEFT JOIN to get tags and their usage counts
+	var result []TagWithUsage
+	if err := db.Raw(`
+		SELECT t.id, t.name, '#4ECDC4' as color, COUNT(ct.tag_id) as usage_count
+		FROM tags t
+		LEFT JOIN conversation_tags ct ON t.id = ct.tag_id
+		GROUP BY t.id, t.name
+		ORDER BY t.name
+	`).Scan(&result).Error; err != nil {
+		log.Error("Failed to get tags:", err)
+		return response.Error(response.NewErrorWithDetails(response.ErrorCodeDatabaseError, "Failed to get tags", 500, err.Error()))
 	}
 
 	return response.OK(result)

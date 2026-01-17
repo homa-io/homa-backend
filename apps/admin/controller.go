@@ -27,15 +27,6 @@ type Controller struct {
 func (c Controller) GetUnreadTickets(request *evo.Request) any {
 	var user = request.User().(*auth.User)
 
-	// Get user departments
-	var userDepartments []uint
-	err := db.Model(&models.UserDepartment{}).
-		Where("user_id = ?", user.UserID).
-		Pluck("department_id", &userDepartments).Error
-	if err != nil {
-		return response.Error(response.ErrInternalError)
-	}
-
 	var tickets []models.Conversation
 	query := db.
 		Preload("Client").
@@ -47,6 +38,10 @@ func (c Controller) GetUnreadTickets(request *evo.Request) any {
 
 	// Administrators can see all tickets, agents see tickets from their departments or assigned to them
 	if user.Type == auth.UserTypeAgent {
+		userDepartments, err := getAgentDepartments(user.UserID)
+		if err != nil {
+			return response.Error(response.ErrInternalError)
+		}
 		query = query.Where(
 			"department_id IN (?) OR id IN (SELECT conversation_id FROM conversation_assignments WHERE user_id = ?)",
 			userDepartments, user.UserID,
@@ -70,29 +65,23 @@ func (c Controller) GetUnreadTickets(request *evo.Request) any {
 func (c Controller) GetUnreadTicketsCount(request *evo.Request) any {
 	var user = request.User().(*auth.User)
 
-	// Get user departments
-	var userDepartments []uint
-	err := db.Model(&models.UserDepartment{}).
-		Where("user_id = ?", user.UserID).
-		Pluck("department_id", &userDepartments).Error
-	if err != nil {
-		return response.Error(response.ErrInternalError)
-	}
-
 	var count int64
 	query := db.Model(&models.Conversation{}).
 		Where("status IN (?)", []string{models.ConversationStatusNew, models.ConversationStatusWaitForAgent})
 
 	// Administrators can see all tickets, agents see tickets from their departments or assigned to them
 	if user.Type == auth.UserTypeAgent {
+		userDepartments, err := getAgentDepartments(user.UserID)
+		if err != nil {
+			return response.Error(response.ErrInternalError)
+		}
 		query = query.Where(
 			"department_id IN (?) OR id IN (SELECT conversation_id FROM conversation_assignments WHERE user_id = ?)",
 			userDepartments, user.UserID,
 		)
 	}
 
-	err = query.Count(&count).Error
-	if err != nil {
+	if err := query.Count(&count).Error; err != nil {
 		return response.Error(response.ErrInternalError)
 	}
 
@@ -102,17 +91,6 @@ func (c Controller) GetUnreadTicketsCount(request *evo.Request) any {
 // ListTickets returns paginated list of tickets with search and filtering
 func (c Controller) ListTickets(request *evo.Request) any {
 	var user = request.User().(*auth.User)
-
-	// Get user departments for agents
-	var userDepartments []uint
-	if user.Type == auth.UserTypeAgent {
-		err := db.Model(&models.UserDepartment{}).
-			Where("user_id = ?", user.UserID).
-			Pluck("department_id", &userDepartments).Error
-		if err != nil {
-			return response.Error(response.ErrInternalError)
-		}
-	}
 
 	var tickets []models.Conversation
 	query := db.
@@ -125,8 +103,12 @@ func (c Controller) ListTickets(request *evo.Request) any {
 		Preload("Assignments.User").
 		Preload("Assignments.Department")
 
-	// Apply access control
+	// Apply access control - agents can only see tickets from their departments or assigned to them
 	if user.Type == auth.UserTypeAgent {
+		userDepartments, err := getAgentDepartments(user.UserID)
+		if err != nil {
+			return response.Error(response.ErrInternalError)
+		}
 		query = query.Where(
 			"department_id IN (?) OR id IN (SELECT conversation_id FROM conversation_assignments WHERE user_id = ?)",
 			userDepartments, user.UserID,
@@ -645,9 +627,8 @@ func (c Controller) CreateDepartment(request *evo.Request) any {
 	err := tx.Create(&department).Error
 	if err != nil {
 		tx.Rollback()
-		if strings.Contains(err.Error(), "duplicate") || strings.Contains(err.Error(), "unique") {
-			duplicateErr := response.NewError(response.ErrorCodeConflict, "Department name already exists", 409)
-			return response.Error(duplicateErr)
+		if isDuplicateError(err) {
+			return response.Error(response.NewError(response.ErrorCodeConflict, "Department name already exists", 409))
 		}
 		return response.Error(response.ErrInternalError)
 	}
@@ -725,9 +706,8 @@ func (c Controller) EditDepartment(request *evo.Request) any {
 	err = tx.Model(&department).Updates(updates).Error
 	if err != nil {
 		tx.Rollback()
-		if strings.Contains(err.Error(), "duplicate") || strings.Contains(err.Error(), "unique") {
-			duplicateErr := response.NewError(response.ErrorCodeConflict, "Department name already exists", 409)
-			return response.Error(duplicateErr)
+		if isDuplicateError(err) {
+			return response.Error(response.NewError(response.ErrorCodeConflict, "Department name already exists", 409))
 		}
 		return response.Error(response.ErrInternalError)
 	}
@@ -925,9 +905,8 @@ func (c Controller) AddTag(request *evo.Request) any {
 
 	err := db.Create(&tag).Error
 	if err != nil {
-		if strings.Contains(err.Error(), "duplicate") || strings.Contains(err.Error(), "unique") {
-			duplicateErr := response.NewError(response.ErrorCodeConflict, "Tag already exists", 409)
-			return response.Error(duplicateErr)
+		if isDuplicateError(err) {
+			return response.Error(response.NewError(response.ErrorCodeConflict, "Tag already exists", 409))
 		}
 		return response.Error(response.ErrInternalError)
 	}
@@ -1032,9 +1011,8 @@ func (c Controller) CreateUser(request *evo.Request) any {
 	// Save user to database
 	err = db.Create(&user).Error
 	if err != nil {
-		if strings.Contains(err.Error(), "duplicate") || strings.Contains(err.Error(), "unique") {
-			duplicateErr := response.NewError(response.ErrorCodeConflict, "User with this email already exists", 409)
-			return response.Error(duplicateErr)
+		if isDuplicateError(err) {
+			return response.Error(response.NewError(response.ErrorCodeConflict, "User with this email already exists", 409))
 		}
 		return response.Error(response.ErrInternalError)
 	}
@@ -1105,9 +1083,8 @@ func (c Controller) EditUser(request *evo.Request) any {
 
 	err = db.Model(&user).Updates(updates).Error
 	if err != nil {
-		if strings.Contains(err.Error(), "duplicate") || strings.Contains(err.Error(), "unique") {
-			duplicateErr := response.NewError(response.ErrorCodeConflict, "User with this email already exists", 409)
-			return response.Error(duplicateErr)
+		if isDuplicateError(err) {
+			return response.Error(response.NewError(response.ErrorCodeConflict, "User with this email already exists", 409))
 		}
 		return response.Error(response.ErrInternalError)
 	}
@@ -1373,9 +1350,8 @@ func (c Controller) CreateCustomAttribute(request *evo.Request) any {
 
 	err := db.Create(&customAttr).Error
 	if err != nil {
-		if strings.Contains(err.Error(), "duplicate") || strings.Contains(err.Error(), "unique") {
-			duplicateErr := response.NewError(response.ErrorCodeConflict, "Custom attribute with this scope and name already exists", 409)
-			return response.Error(duplicateErr)
+		if isDuplicateError(err) {
+			return response.Error(response.NewError(response.ErrorCodeConflict, "Custom attribute with this scope and name already exists", 409))
 		}
 		return response.Error(response.ErrInternalError)
 	}
@@ -1559,9 +1535,8 @@ func (c Controller) CreateChannel(request *evo.Request) any {
 
 	err := db.Create(&channel).Error
 	if err != nil {
-		if strings.Contains(err.Error(), "duplicate") || strings.Contains(err.Error(), "unique") {
-			duplicateErr := response.NewError(response.ErrorCodeConflict, "Channel with this ID already exists", 409)
-			return response.Error(duplicateErr)
+		if isDuplicateError(err) {
+			return response.Error(response.NewError(response.ErrorCodeConflict, "Channel with this ID already exists", 409))
 		}
 		return response.Error(response.ErrInternalError)
 	}
@@ -1739,6 +1714,20 @@ func sanitizeSearch(s string) string {
 	s = strings.ReplaceAll(s, "%", "\\%")
 	s = strings.ReplaceAll(s, "_", "\\_")
 	return s
+}
+
+// getAgentDepartments returns the department IDs assigned to an agent
+func getAgentDepartments(userID uuid.UUID) ([]uint, error) {
+	var departments []uint
+	err := db.Model(&models.UserDepartment{}).
+		Where("user_id = ?", userID).
+		Pluck("department_id", &departments).Error
+	return departments, err
+}
+
+// isDuplicateError checks if an error is a duplicate/unique constraint violation
+func isDuplicateError(err error) bool {
+	return err != nil && (strings.Contains(err.Error(), "duplicate") || strings.Contains(err.Error(), "unique"))
 }
 
 func (c Controller) hasTicketAccess(user *auth.User, ticketID uint) bool {
