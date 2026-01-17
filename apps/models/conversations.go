@@ -350,6 +350,26 @@ func (m *Message) BeforeCreate(tx *gorm.DB) error {
 		m.Language = DetectMessageLanguage(m.Body)
 	}
 
+	// If detection failed (empty result) and this is a customer message,
+	// use the conversation's dominant language as fallback
+	if m.Language == "" && m.ClientID != nil && m.ConversationID > 0 {
+		// Get the most common language from recent customer messages in this conversation
+		var dominantLang string
+		tx.Raw(`
+			SELECT language FROM messages
+			WHERE conversation_id = ?
+			AND client_id IS NOT NULL
+			AND language IS NOT NULL
+			AND language != ''
+			ORDER BY created_at DESC
+			LIMIT 1
+		`, m.ConversationID).Scan(&dominantLang)
+
+		if dominantLang != "" {
+			m.Language = dominantLang
+		}
+	}
+
 	return nil
 }
 
