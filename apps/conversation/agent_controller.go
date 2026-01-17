@@ -942,6 +942,7 @@ func (ac AgentController) GetConversationMessages(req *evo.Request) interface{} 
 			ID:              msg.ID,
 			Body:            msg.Body,
 			Type:            msgType,
+			Language:        msg.Language,
 			IsAgent:         isAgent,
 			IsSystemMessage: msg.IsSystemMessage,
 			CreatedAt:       msg.CreatedAt.Format("2006-01-02T15:04:05Z07:00"),
