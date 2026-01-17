@@ -53,3 +53,19 @@ _webhook_test/logs/
 _webhook_test/server.log
 # Cache directory
 cache/
+
+# Go binary
+main
+main~
+
+# Swagger source maps (optional, large files)
+static/swagger/*.map
+
+# Temporary files
+*.tmp
+*.bak
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
