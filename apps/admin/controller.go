@@ -7,6 +7,7 @@ import (
 
 	"github.com/getevo/evo/v2"
 	"github.com/getevo/evo/v2/lib/db"
+	"github.com/getevo/evo/v2/lib/log"
 	"github.com/getevo/pagination"
 	"github.com/google/uuid"
 	"github.com/iesreza/homa-backend/apps/auth"
@@ -208,7 +209,10 @@ func (c Controller) ChangeTicketStatus(request *evo.Request) any {
 		Body:            "Status changed to " + req.Status,
 		IsSystemMessage: true,
 	}
-	db.Create(&message)
+	if err := db.Create(&message).Error; err != nil {
+		log.Error("Failed to create status change message: %v", err)
+		// Continue - status was updated successfully, just logging failed
+	}
 
 	return response.OK(map[string]interface{}{
 		"message": "Ticket status updated successfully",
@@ -348,7 +352,10 @@ func (c Controller) AssignTicket(request *evo.Request) any {
 		Body:            assignmentMessage,
 		IsSystemMessage: true,
 	}
-	db.Create(&message)
+	if err := db.Create(&message).Error; err != nil {
+		log.Error("Failed to create assignment message: %v", err)
+		// Continue - assignment was successful, just logging failed
+	}
 
 	return response.OK(map[string]interface{}{
 		"message":    "Ticket assigned successfully",
@@ -401,7 +408,10 @@ func (c Controller) ChangeTicketDepartments(request *evo.Request) any {
 		Body:            "Ticket department changed",
 		IsSystemMessage: true,
 	}
-	db.Create(&message)
+	if err := db.Create(&message).Error; err != nil {
+		log.Error("Failed to create department change message: %v", err)
+		// Continue - department was updated successfully, just logging failed
+	}
 
 	return response.OK(map[string]interface{}{
 		"message":       "Ticket department updated successfully",
@@ -519,39 +529,48 @@ func (c Controller) DeleteTicket(request *evo.Request) any {
 		return response.Error(response.ErrInternalError)
 	}
 
-	// Start transaction
+	// Start transaction with defer rollback for cleanup
 	tx := db.Begin()
+	if tx.Error != nil {
+		log.Error("Failed to start transaction: %v", tx.Error)
+		return response.Error(response.ErrInternalError)
+	}
+	defer func() {
+		if r := recover(); r != nil {
+			tx.Rollback()
+			panic(r) // re-throw panic after rollback
+		}
+	}()
 
 	// Delete all messages associated with the ticket
-	err = tx.Where("conversation_id = ?", ticketID).Delete(&models.Message{}).Error
-	if err != nil {
+	if err = tx.Where("conversation_id = ?", ticketID).Delete(&models.Message{}).Error; err != nil {
 		tx.Rollback()
 		return response.Error(response.ErrInternalError)
 	}
 
 	// Delete all ticket tags
-	err = tx.Where("conversation_id = ?", ticketID).Delete(&models.ConversationTag{}).Error
-	if err != nil {
+	if err = tx.Where("conversation_id = ?", ticketID).Delete(&models.ConversationTag{}).Error; err != nil {
 		tx.Rollback()
 		return response.Error(response.ErrInternalError)
 	}
 
 	// Delete all ticket assignments
-	err = tx.Where("conversation_id = ?", ticketID).Delete(&models.ConversationAssignment{}).Error
-	if err != nil {
+	if err = tx.Where("conversation_id = ?", ticketID).Delete(&models.ConversationAssignment{}).Error; err != nil {
 		tx.Rollback()
 		return response.Error(response.ErrInternalError)
 	}
 
 	// Delete the ticket itself
-	err = tx.Delete(&ticket).Error
-	if err != nil {
+	if err = tx.Delete(&ticket).Error; err != nil {
 		tx.Rollback()
 		return response.Error(response.ErrInternalError)
 	}
 
 	// Commit transaction
-	tx.Commit()
+	if err = tx.Commit().Error; err != nil {
+		log.Error("Failed to commit transaction: %v", err)
+		return response.Error(response.ErrInternalError)
+	}
 
 	return response.OK(map[string]interface{}{
 		"message":         "Ticket deleted successfully",
@@ -623,6 +642,16 @@ func (c Controller) CreateDepartment(request *evo.Request) any {
 
 	// Use transaction for creating department and assigning users
 	tx := db.Begin()
+	if tx.Error != nil {
+		log.Error("Failed to start transaction: %v", tx.Error)
+		return response.Error(response.ErrInternalError)
+	}
+	defer func() {
+		if r := recover(); r != nil {
+			tx.Rollback()
+			panic(r)
+		}
+	}()
 
 	err := tx.Create(&department).Error
 	if err != nil {
@@ -646,7 +675,7 @@ func (c Controller) CreateDepartment(request *evo.Request) any {
 			}
 			if err := tx.Create(&userDept).Error; err != nil {
 				// Ignore duplicate entries
-				if !strings.Contains(err.Error(), "duplicate") && !strings.Contains(err.Error(), "unique") {
+				if !isDuplicateError(err) {
 					tx.Rollback()
 					return response.Error(response.ErrInternalError)
 				}
@@ -654,7 +683,10 @@ func (c Controller) CreateDepartment(request *evo.Request) any {
 		}
 	}
 
-	tx.Commit()
+	if err := tx.Commit().Error; err != nil {
+		log.Error("Failed to commit transaction: %v", err)
+		return response.Error(response.ErrInternalError)
+	}
 
 	// Reload with users and AI agent
 	db.Preload("Users").Preload("AIAgent").First(&department, department.ID)
@@ -692,6 +724,16 @@ func (c Controller) EditDepartment(request *evo.Request) any {
 	}
 
 	tx := db.Begin()
+	if tx.Error != nil {
+		log.Error("Failed to start transaction: %v", tx.Error)
+		return response.Error(response.ErrInternalError)
+	}
+	defer func() {
+		if r := recover(); r != nil {
+			tx.Rollback()
+			panic(r)
+		}
+	}()
 
 	// Update department fields
 	updates := map[string]interface{}{
@@ -733,7 +775,7 @@ func (c Controller) EditDepartment(request *evo.Request) any {
 			}
 			if err := tx.Create(&userDept).Error; err != nil {
 				// Ignore duplicate entries
-				if !strings.Contains(err.Error(), "duplicate") && !strings.Contains(err.Error(), "unique") {
+				if !isDuplicateError(err) {
 					tx.Rollback()
 					return response.Error(response.ErrInternalError)
 				}
@@ -742,6 +784,7 @@ func (c Controller) EditDepartment(request *evo.Request) any {
 	}
 
 	if err := tx.Commit().Error; err != nil {
+		log.Error("Failed to commit transaction: %v", err)
 		return response.Error(response.ErrInternalError)
 	}
 
@@ -932,22 +975,33 @@ func (c Controller) DeleteTag(request *evo.Request) any {
 
 	// Start transaction to ensure data consistency
 	tx := db.Begin()
+	if tx.Error != nil {
+		log.Error("Failed to start transaction: %v", tx.Error)
+		return response.Error(response.ErrInternalError)
+	}
+	defer func() {
+		if r := recover(); r != nil {
+			tx.Rollback()
+			panic(r)
+		}
+	}()
 
 	// Remove tag from all tickets
-	err = tx.Where("tag_id = ?", tagID).Delete(&models.ConversationTag{}).Error
-	if err != nil {
+	if err = tx.Where("tag_id = ?", tagID).Delete(&models.ConversationTag{}).Error; err != nil {
 		tx.Rollback()
 		return response.Error(response.ErrInternalError)
 	}
 
 	// Delete the tag
-	err = tx.Delete(&tag).Error
-	if err != nil {
+	if err = tx.Delete(&tag).Error; err != nil {
 		tx.Rollback()
 		return response.Error(response.ErrInternalError)
 	}
 
-	tx.Commit()
+	if err = tx.Commit().Error; err != nil {
+		log.Error("Failed to commit transaction: %v", err)
+		return response.Error(response.ErrInternalError)
+	}
 
 	return response.OK(map[string]interface{}{
 		"message": "Tag deleted successfully",
