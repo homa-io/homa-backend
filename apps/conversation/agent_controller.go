@@ -2172,10 +2172,16 @@ func (ac AgentController) AddAgentMessage(req *evo.Request) interface{} {
 
 	// Auto-translate outgoing if enabled
 	if user != nil && user.AutoTranslateOutgoing {
-		// Get customer language
-		customerLang := "en"
-		if conversation.Client.Language != nil && *conversation.Client.Language != "" {
-			customerLang = *conversation.Client.Language
+		// Get customer language - prioritize detected language from recent messages
+		// This matches the logic in TranslateOutgoing for consistency
+		customerLang := getCustomerLanguageFromMessages(conversationID)
+		if customerLang == "" {
+			// Fallback to client's stored language
+			if conversation.Client.Language != nil && *conversation.Client.Language != "" {
+				customerLang = *conversation.Client.Language
+			} else {
+				customerLang = "en"
+			}
 		}
 
 		// Get agent language
