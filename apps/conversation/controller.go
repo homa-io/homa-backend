@@ -40,6 +40,7 @@ type CreateConversationRequest struct {
 	Status       string         `json:"status" example:"new"`                                                             // Optional - defaults to "new" for widget
 	Priority     string         `json:"priority" example:"medium"`                                                        // Optional - defaults to "medium" for widget
 	Parameters   map[string]any `json:"parameters" swaggertype:"object" example:"issue_type:technical,urgency_level:2"` // Custom attributes for conversation
+	InboxKey     *string        `json:"inbox_key" example:"inbox_abc123..."`                                             // Optional inbox API key for web conversations
 
 	// Client fields (for creating new clients)
 	ClientName       *string        `json:"client_name" example:"John Doe"`                                                                                                                                 // If provided, creates a new client
@@ -120,6 +121,25 @@ func (c Controller) CreateConversation(req *evo.Request) interface{} {
 		input.Priority = "medium"
 	}
 
+	// Lookup inbox by API key if provided
+	var inboxID *uint
+	if input.InboxKey != nil && *input.InboxKey != "" {
+		inbox, err := models.GetInboxByAPIKey(*input.InboxKey)
+		if err != nil {
+			return response.Error(response.NewError(response.ErrorCodeNotFound, "Inbox not found", 404))
+		}
+		if !inbox.Enabled {
+			return response.Error(response.NewError(response.ErrorCodeForbidden, "Inbox is disabled", 403))
+		}
+		inboxID = &inbox.ID
+	} else {
+		// Use default inbox if no key provided
+		inbox, err := models.GetDefaultInbox()
+		if err == nil {
+			inboxID = &inbox.ID
+		}
+	}
+
 	// Handle client creation or lookup
 	var clientID uuid.UUID
 	var err error
@@ -192,6 +212,7 @@ func (c Controller) CreateConversation(req *evo.Request) interface{} {
 		IP:              &clientIP,
 		Browser:         browser,
 		OperatingSystem: operatingSystem,
+		InboxID:         inboxID,
 	}
 
 	// Create the conversation using the business logic function
@@ -202,7 +223,7 @@ func (c Controller) CreateConversation(req *evo.Request) interface{} {
 	}
 
 	// Load related data for response
-	if err := db.Preload("Client").Preload("Department").Preload("Channel").First(conversation, conversation.ID).Error; err != nil {
+	if err := db.Preload("Client").Preload("Department").Preload("Channel").Preload("Inbox").First(conversation, conversation.ID).Error; err != nil {
 		log.Warning("Failed to preload conversation relations:", err)
 	}
 

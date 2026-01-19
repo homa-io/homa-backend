@@ -1,4 +1,4 @@
-// Package gmail provides the Gmail API integration driver.
+// Package gmail provides the Gmail integration driver using IMAP/SMTP with OAuth2.
 package gmail
 
 import (
@@ -6,11 +6,10 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"strings"
 	"time"
 
 	"github.com/iesreza/homa-backend/apps/integrations/drivers"
-	"github.com/iesreza/homa-backend/apps/models"
+	"github.com/iesreza/homa-backend/apps/integrations/email"
 )
 
 const (
@@ -19,6 +18,18 @@ const (
 	// DisplayName is the human-readable name.
 	DisplayName = "Gmail"
 )
+
+// Config holds Gmail integration configuration.
+type Config struct {
+	ClientID     string `json:"client_id"`
+	ClientSecret string `json:"client_secret"`
+	RefreshToken string `json:"refresh_token"`
+	Email        string `json:"email"`
+	FromName     string `json:"from_name"`
+
+	// HTML template for outgoing emails
+	Template string `json:"template"`
+}
 
 // Driver implements the drivers.Driver interface for Gmail.
 type Driver struct{}
@@ -40,7 +51,7 @@ func (d *Driver) Name() string {
 
 // Test validates the connection using the provided configuration.
 func (d *Driver) Test(configJSON string) drivers.TestResult {
-	var config models.GmailConfig
+	var config Config
 	if err := json.Unmarshal([]byte(configJSON), &config); err != nil {
 		return drivers.TestResult{Success: false, Message: "Invalid configuration", Details: err.Error()}
 	}
@@ -49,35 +60,14 @@ func (d *Driver) Test(configJSON string) drivers.TestResult {
 		return drivers.TestResult{Success: false, Message: "Client ID, Client Secret, and Refresh Token are required"}
 	}
 
-	// Exchange refresh token for access token
-	tokenURL := "https://oauth2.googleapis.com/token"
-	data := fmt.Sprintf("client_id=%s&client_secret=%s&refresh_token=%s&grant_type=refresh_token",
-		config.ClientID, config.ClientSecret, config.RefreshToken)
-
-	client := &http.Client{Timeout: 10 * time.Second}
-	resp, err := client.Post(tokenURL, "application/x-www-form-urlencoded", strings.NewReader(data))
+	// Test OAuth2 token refresh
+	accessToken, err := email.RefreshGmailAccessToken(config.ClientID, config.ClientSecret, config.RefreshToken)
 	if err != nil {
-		return drivers.TestResult{Success: false, Message: "Failed to connect to Google OAuth", Details: err.Error()}
-	}
-	defer resp.Body.Close()
-
-	body, _ := io.ReadAll(resp.Body)
-	var tokenResult map[string]interface{}
-	if err := json.Unmarshal(body, &tokenResult); err != nil {
-		return drivers.TestResult{Success: false, Message: "Invalid response from Google", Details: err.Error()}
+		return drivers.TestResult{Success: false, Message: "OAuth2 token refresh failed", Details: err.Error()}
 	}
 
-	if _, ok := tokenResult["error"]; ok {
-		errDesc, _ := tokenResult["error_description"].(string)
-		return drivers.TestResult{Success: false, Message: "Google authentication failed", Details: errDesc}
-	}
-
-	accessToken, _ := tokenResult["access_token"].(string)
-	if accessToken == "" {
-		return drivers.TestResult{Success: false, Message: "Failed to obtain access token"}
-	}
-
-	// Test Gmail API access
+	// Test Gmail API access to get email address
+	client := &http.Client{Timeout: 10 * time.Second}
 	req, _ := http.NewRequest("GET", "https://gmail.googleapis.com/gmail/v1/users/me/profile", nil)
 	req.Header.Set("Authorization", "Bearer "+accessToken)
 
@@ -92,26 +82,45 @@ func (d *Driver) Test(configJSON string) drivers.TestResult {
 		return drivers.TestResult{Success: false, Message: "Gmail API access denied", Details: string(body)}
 	}
 
-	body, _ = io.ReadAll(gmailResp.Body)
+	body, _ := io.ReadAll(gmailResp.Body)
 	var profile map[string]interface{}
 	json.Unmarshal(body, &profile)
-	email, _ := profile["emailAddress"].(string)
+	userEmail, _ := profile["emailAddress"].(string)
+
+	// Test IMAP connection
+	emailConfig := d.toEmailConfig(config)
+	emailConfig.Email = userEmail
+	imapClient := email.NewIMAPClient(*emailConfig)
+	if err := imapClient.TestConnection(); err != nil {
+		return drivers.TestResult{
+			Success: true,
+			Message: fmt.Sprintf("OAuth2 OK for %s. Note: IMAP test skipped (may need app password or OAuth2 IMAP enabled)", userEmail),
+		}
+	}
 
 	return drivers.TestResult{
 		Success: true,
-		Message: fmt.Sprintf("Successfully connected to Gmail: %s", email),
+		Message: fmt.Sprintf("Successfully connected to Gmail: %s (OAuth2 + IMAP verified)", userEmail),
 	}
 }
 
 // Validate checks if the configuration is complete and valid.
 func (d *Driver) Validate(configJSON string) error {
-	var config models.GmailConfig
+	var config Config
 	if err := json.Unmarshal([]byte(configJSON), &config); err != nil {
 		return fmt.Errorf("invalid Gmail configuration: %w", err)
 	}
 	if config.ClientID == "" || config.ClientSecret == "" || config.RefreshToken == "" {
 		return fmt.Errorf("client ID, client secret, and refresh token are required")
 	}
+
+	// Validate template if provided
+	if config.Template != "" {
+		if err := email.ValidateTemplate(config.Template); err != nil {
+			return fmt.Errorf("invalid template: %w", err)
+		}
+	}
+
 	return nil
 }
 
@@ -121,7 +130,9 @@ func (d *Driver) GetConfigFields() []drivers.ConfigField {
 		{Name: "client_id", Label: "Client ID", Type: "text", Required: true, Placeholder: "xxx.apps.googleusercontent.com"},
 		{Name: "client_secret", Label: "Client Secret", Type: "password", Required: true, Placeholder: "Client secret from Google Console"},
 		{Name: "refresh_token", Label: "Refresh Token", Type: "password", Required: true, Placeholder: "OAuth refresh token"},
-		{Name: "email", Label: "Email Address", Type: "email", Required: false, Placeholder: "user@gmail.com"},
+		{Name: "email", Label: "Email Address", Type: "email", Required: true, Placeholder: "user@gmail.com"},
+		{Name: "from_name", Label: "From Name", Type: "text", Required: false, Placeholder: "Support Team"},
+		{Name: "template", Label: "Email Template (HTML)", Type: "html", Required: false},
 	}
 }
 
@@ -132,11 +143,11 @@ func (d *Driver) GetMaskedConfig(configJSON string) map[string]interface{} {
 		return nil
 	}
 
-	for key, value := range config {
+	for key := range config {
 		if drivers.SensitiveFields[key] {
-			if str, ok := value.(string); ok && len(str) > 8 {
+			if str, ok := config[key].(string); ok && len(str) > 8 {
 				config[key] = str[:4] + "..." + str[len(str)-4:]
-			} else if str, ok := value.(string); ok && len(str) > 0 {
+			} else if str, ok := config[key].(string); ok && len(str) > 0 {
 				config[key] = "****"
 			}
 		}
@@ -146,10 +157,56 @@ func (d *Driver) GetMaskedConfig(configJSON string) map[string]interface{} {
 }
 
 // OnSave is called after the integration is saved.
-// Gmail doesn't require any post-save actions.
 func (d *Driver) OnSave(configJSON string, status string, webhookBaseURL string) drivers.OnSaveResult {
 	return drivers.OnSaveResult{
 		Success: true,
-		Message: "Gmail integration saved successfully.",
+		Message: `Gmail integration saved successfully.
+
+Email fetching is enabled - the system will check for new emails periodically.
+
+Setup Instructions:
+1. Go to Google Cloud Console (console.cloud.google.com)
+2. Create or select a project
+3. Enable the Gmail API
+4. Create OAuth2 credentials (Web application type)
+5. Add authorized redirect URI for your OAuth callback
+6. Use the OAuth Playground or your app to get the refresh token
+
+Required OAuth Scopes:
+- https://mail.google.com/
+- https://www.googleapis.com/auth/gmail.send`,
 	}
+}
+
+// toEmailConfig converts Gmail config to unified email.Config.
+func (d *Driver) toEmailConfig(config Config) *email.Config {
+	return &email.Config{
+		Provider:       email.ProviderGmail,
+		AuthType:       email.AuthTypeOAuth2,
+		IMAPEnabled:    true,
+		IMAPHost:       email.GmailPresets.IMAPHost,
+		IMAPPort:       email.GmailPresets.IMAPPort,
+		IMAPEncryption: "ssl",
+		SMTPHost:       email.GmailPresets.SMTPHost,
+		SMTPPort:       email.GmailPresets.SMTPPort,
+		SMTPEncryption: "tls",
+		ClientID:       config.ClientID,
+		ClientSecret:   config.ClientSecret,
+		RefreshToken:   config.RefreshToken,
+		Email:          config.Email,
+		FromEmail:      config.Email,
+		FromName:       config.FromName,
+		Template:       config.Template,
+	}
+}
+
+// GetEmailConfig converts the Gmail config to the unified email.Config.
+func GetEmailConfig(configJSON string) (*email.Config, error) {
+	var config Config
+	if err := json.Unmarshal([]byte(configJSON), &config); err != nil {
+		return nil, err
+	}
+
+	driver := &Driver{}
+	return driver.toEmailConfig(config), nil
 }

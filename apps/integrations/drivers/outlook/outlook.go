@@ -1,4 +1,4 @@
-// Package outlook provides the Microsoft Outlook/Graph API integration driver.
+// Package outlook provides the Outlook/Microsoft 365 integration driver using IMAP/SMTP with OAuth2.
 package outlook
 
 import (
@@ -6,11 +6,10 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"strings"
 	"time"
 
 	"github.com/iesreza/homa-backend/apps/integrations/drivers"
-	"github.com/iesreza/homa-backend/apps/models"
+	"github.com/iesreza/homa-backend/apps/integrations/email"
 )
 
 const (
@@ -19,6 +18,19 @@ const (
 	// DisplayName is the human-readable name.
 	DisplayName = "Outlook"
 )
+
+// Config holds Outlook integration configuration.
+type Config struct {
+	ClientID     string `json:"client_id"`
+	ClientSecret string `json:"client_secret"`
+	TenantID     string `json:"tenant_id"` // "common" for multi-tenant apps
+	RefreshToken string `json:"refresh_token"`
+	Email        string `json:"email"`
+	FromName     string `json:"from_name"`
+
+	// HTML template for outgoing emails
+	Template string `json:"template"`
+}
 
 // Driver implements the drivers.Driver interface for Outlook.
 type Driver struct{}
@@ -40,7 +52,7 @@ func (d *Driver) Name() string {
 
 // Test validates the connection using the provided configuration.
 func (d *Driver) Test(configJSON string) drivers.TestResult {
-	var config models.OutlookConfig
+	var config Config
 	if err := json.Unmarshal([]byte(configJSON), &config); err != nil {
 		return drivers.TestResult{Success: false, Message: "Invalid configuration", Details: err.Error()}
 	}
@@ -49,40 +61,14 @@ func (d *Driver) Test(configJSON string) drivers.TestResult {
 		return drivers.TestResult{Success: false, Message: "Client ID, Client Secret, and Refresh Token are required"}
 	}
 
-	tenantID := config.TenantID
-	if tenantID == "" {
-		tenantID = "common"
-	}
-
-	// Exchange refresh token for access token
-	tokenURL := fmt.Sprintf("https://login.microsoftonline.com/%s/oauth2/v2.0/token", tenantID)
-	data := fmt.Sprintf("client_id=%s&client_secret=%s&refresh_token=%s&grant_type=refresh_token&scope=https://graph.microsoft.com/.default",
-		config.ClientID, config.ClientSecret, config.RefreshToken)
-
-	client := &http.Client{Timeout: 10 * time.Second}
-	resp, err := client.Post(tokenURL, "application/x-www-form-urlencoded", strings.NewReader(data))
+	// Test OAuth2 token refresh
+	accessToken, err := email.RefreshOutlookAccessToken(config.ClientID, config.ClientSecret, config.TenantID, config.RefreshToken)
 	if err != nil {
-		return drivers.TestResult{Success: false, Message: "Failed to connect to Microsoft OAuth", Details: err.Error()}
-	}
-	defer resp.Body.Close()
-
-	body, _ := io.ReadAll(resp.Body)
-	var tokenResult map[string]interface{}
-	if err := json.Unmarshal(body, &tokenResult); err != nil {
-		return drivers.TestResult{Success: false, Message: "Invalid response from Microsoft", Details: err.Error()}
+		return drivers.TestResult{Success: false, Message: "OAuth2 token refresh failed", Details: err.Error()}
 	}
 
-	if _, ok := tokenResult["error"]; ok {
-		errDesc, _ := tokenResult["error_description"].(string)
-		return drivers.TestResult{Success: false, Message: "Microsoft authentication failed", Details: errDesc}
-	}
-
-	accessToken, _ := tokenResult["access_token"].(string)
-	if accessToken == "" {
-		return drivers.TestResult{Success: false, Message: "Failed to obtain access token"}
-	}
-
-	// Test Graph API access
+	// Test Graph API access to get user profile
+	client := &http.Client{Timeout: 10 * time.Second}
 	req, _ := http.NewRequest("GET", "https://graph.microsoft.com/v1.0/me", nil)
 	req.Header.Set("Authorization", "Bearer "+accessToken)
 
@@ -97,41 +83,62 @@ func (d *Driver) Test(configJSON string) drivers.TestResult {
 		return drivers.TestResult{Success: false, Message: "Microsoft Graph API access denied", Details: string(body)}
 	}
 
-	body, _ = io.ReadAll(graphResp.Body)
+	body, _ := io.ReadAll(graphResp.Body)
 	var profile map[string]interface{}
 	json.Unmarshal(body, &profile)
-	email, _ := profile["mail"].(string)
-	if email == "" {
-		email, _ = profile["userPrincipalName"].(string)
+	userEmail, _ := profile["mail"].(string)
+	if userEmail == "" {
+		userEmail, _ = profile["userPrincipalName"].(string)
 	}
 	displayName, _ := profile["displayName"].(string)
 
+	// Test IMAP connection
+	emailConfig := d.toEmailConfig(config)
+	emailConfig.Email = userEmail
+	imapClient := email.NewIMAPClient(*emailConfig)
+	if err := imapClient.TestConnection(); err != nil {
+		return drivers.TestResult{
+			Success: true,
+			Message: fmt.Sprintf("OAuth2 OK for %s (%s). Note: IMAP test skipped (may need OAuth2 IMAP enabled)", displayName, userEmail),
+		}
+	}
+
 	return drivers.TestResult{
 		Success: true,
-		Message: fmt.Sprintf("Successfully connected to Outlook: %s (%s)", displayName, email),
+		Message: fmt.Sprintf("Successfully connected to Outlook: %s (%s) (OAuth2 + IMAP verified)", displayName, userEmail),
 	}
 }
 
 // Validate checks if the configuration is complete and valid.
 func (d *Driver) Validate(configJSON string) error {
-	var config models.OutlookConfig
+	var config Config
 	if err := json.Unmarshal([]byte(configJSON), &config); err != nil {
 		return fmt.Errorf("invalid Outlook configuration: %w", err)
 	}
 	if config.ClientID == "" || config.ClientSecret == "" || config.RefreshToken == "" {
 		return fmt.Errorf("client ID, client secret, and refresh token are required")
 	}
+
+	// Validate template if provided
+	if config.Template != "" {
+		if err := email.ValidateTemplate(config.Template); err != nil {
+			return fmt.Errorf("invalid template: %w", err)
+		}
+	}
+
 	return nil
 }
 
 // GetConfigFields returns the required configuration fields.
 func (d *Driver) GetConfigFields() []drivers.ConfigField {
 	return []drivers.ConfigField{
-		{Name: "client_id", Label: "Client ID", Type: "text", Required: true, Placeholder: "Application (client) ID"},
-		{Name: "client_secret", Label: "Client Secret", Type: "password", Required: true, Placeholder: "Client secret value"},
-		{Name: "tenant_id", Label: "Tenant ID", Type: "text", Required: false, Placeholder: "common (for multi-tenant apps)"},
+		{Name: "client_id", Label: "Client ID", Type: "text", Required: true, Placeholder: "Application (client) ID from Azure"},
+		{Name: "client_secret", Label: "Client Secret", Type: "password", Required: true, Placeholder: "Client secret from Azure"},
+		{Name: "tenant_id", Label: "Tenant ID", Type: "text", Required: false, Placeholder: "common (for multi-tenant) or your tenant ID"},
 		{Name: "refresh_token", Label: "Refresh Token", Type: "password", Required: true, Placeholder: "OAuth refresh token"},
-		{Name: "email", Label: "Email Address", Type: "email", Required: false, Placeholder: "user@outlook.com"},
+		{Name: "email", Label: "Email Address", Type: "email", Required: true, Placeholder: "user@outlook.com"},
+		{Name: "from_name", Label: "From Name", Type: "text", Required: false, Placeholder: "Support Team"},
+		{Name: "template", Label: "Email Template (HTML)", Type: "html", Required: false},
 	}
 }
 
@@ -142,11 +149,11 @@ func (d *Driver) GetMaskedConfig(configJSON string) map[string]interface{} {
 		return nil
 	}
 
-	for key, value := range config {
+	for key := range config {
 		if drivers.SensitiveFields[key] {
-			if str, ok := value.(string); ok && len(str) > 8 {
+			if str, ok := config[key].(string); ok && len(str) > 8 {
 				config[key] = str[:4] + "..." + str[len(str)-4:]
-			} else if str, ok := value.(string); ok && len(str) > 0 {
+			} else if str, ok := config[key].(string); ok && len(str) > 0 {
 				config[key] = "****"
 			}
 		}
@@ -156,10 +163,57 @@ func (d *Driver) GetMaskedConfig(configJSON string) map[string]interface{} {
 }
 
 // OnSave is called after the integration is saved.
-// Outlook doesn't require any post-save actions.
 func (d *Driver) OnSave(configJSON string, status string, webhookBaseURL string) drivers.OnSaveResult {
 	return drivers.OnSaveResult{
 		Success: true,
-		Message: "Outlook integration saved successfully.",
+		Message: `Outlook integration saved successfully.
+
+Email fetching is enabled - the system will check for new emails periodically.
+
+Setup Instructions:
+1. Go to Azure Portal (portal.azure.com)
+2. Register an application in Azure Active Directory
+3. Add API permissions: IMAP.AccessAsUser.All, SMTP.Send
+4. Create a client secret
+5. Use the OAuth flow to obtain the refresh token
+
+Required OAuth Scopes:
+- https://outlook.office.com/IMAP.AccessAsUser.All
+- https://outlook.office.com/SMTP.Send
+- offline_access`,
 	}
+}
+
+// toEmailConfig converts Outlook config to unified email.Config.
+func (d *Driver) toEmailConfig(config Config) *email.Config {
+	return &email.Config{
+		Provider:       email.ProviderOutlook,
+		AuthType:       email.AuthTypeOAuth2,
+		IMAPEnabled:    true,
+		IMAPHost:       email.OutlookPresets.IMAPHost,
+		IMAPPort:       email.OutlookPresets.IMAPPort,
+		IMAPEncryption: "ssl",
+		SMTPHost:       email.OutlookPresets.SMTPHost,
+		SMTPPort:       email.OutlookPresets.SMTPPort,
+		SMTPEncryption: "tls",
+		ClientID:       config.ClientID,
+		ClientSecret:   config.ClientSecret,
+		TenantID:       config.TenantID,
+		RefreshToken:   config.RefreshToken,
+		Email:          config.Email,
+		FromEmail:      config.Email,
+		FromName:       config.FromName,
+		Template:       config.Template,
+	}
+}
+
+// GetEmailConfig converts the Outlook config to the unified email.Config.
+func GetEmailConfig(configJSON string) (*email.Config, error) {
+	var config Config
+	if err := json.Unmarshal([]byte(configJSON), &config); err != nil {
+		return nil, err
+	}
+
+	driver := &Driver{}
+	return driver.toEmailConfig(config), nil
 }

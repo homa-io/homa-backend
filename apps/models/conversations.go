@@ -30,6 +30,7 @@ const (
 	ConversationStatusClosed       = "closed"
 	ConversationStatusUnresolved   = "unresolved"
 	ConversationStatusSpam         = "spam"
+	ConversationStatusArchived     = "archived"
 )
 
 // Message type constants
@@ -51,6 +52,7 @@ var (
 	SendTelegramMessage func(chatID, text string) error
 	SendWhatsAppMessage func(phoneNumber, text string) error
 	SendSlackMessage    func(channelID, text string) error
+	SendEmailReply      func(conversationID uint, messageID uint, body string, user *auth.User) error
 )
 
 // AI Agent processing function - set by the ai package to avoid circular imports
@@ -62,9 +64,10 @@ type Conversation struct {
 	ClientID     uuid.UUID      `gorm:"column:client_id;type:char(36);not null;index;fk:clients" json:"client_id"`
 	DepartmentID *uint          `gorm:"column:department_id;index;fk:departments" json:"department_id"`
 	ChannelID    string         `gorm:"column:channel_id;size:50;not null;index;fk:channels" json:"channel_id"`
+	InboxID      *uint          `gorm:"column:inbox_id;index;fk:inboxes" json:"inbox_id"`
 	ExternalID   *string        `gorm:"column:external_id;size:255;index" json:"external_id"`
 	Secret       string         `gorm:"column:secret;size:32;not null" json:"-"` // Hidden from JSON - only returned on creation via CreateConversationResponse
-	Status          string         `gorm:"column:status;size:50;not null;index;check:status IN ('new','wait_for_agent','in_progress','wait_for_user','on_hold','resolved','closed','unresolved','spam')" json:"status"`
+	Status          string         `gorm:"column:status;size:50;not null;index;check:status IN ('new','wait_for_agent','in_progress','wait_for_user','on_hold','resolved','closed','unresolved','spam','archived')" json:"status"`
 	Priority        string         `gorm:"column:priority;size:50;not null;index;check:priority IN ('low','medium','high','urgent')" json:"priority"`
 	HandleByBot     bool           `gorm:"column:handle_by_bot;default:1" json:"handle_by_bot"`
 	CustomFields    datatypes.JSON `gorm:"column:custom_fields;type:json" json:"custom_fields"`
@@ -79,6 +82,7 @@ type Conversation struct {
 	Client      Client                   `gorm:"foreignKey:ClientID;references:ID" json:"client,omitempty"`
 	Department  *Department              `gorm:"foreignKey:DepartmentID;references:ID" json:"department,omitempty"`
 	Channel     Channel                  `gorm:"foreignKey:ChannelID;references:ID" json:"channel,omitempty"`
+	Inbox       *Inbox                   `gorm:"foreignKey:InboxID;references:ID" json:"inbox,omitempty"`
 	Messages    []Message                `gorm:"foreignKey:ConversationID;references:ID" json:"messages,omitempty"`
 	Tags        []Tag                    `gorm:"many2many:conversation_tags;foreignKey:ID;joinForeignKey:ConversationID;references:ID;joinReferences:TagID" json:"tags,omitempty"`
 	Assignments []ConversationAssignment `gorm:"foreignKey:ConversationID;references:ID" json:"assignments,omitempty"`
@@ -568,6 +572,24 @@ func (m *Message) sendToExternalChannel() {
 		}
 		if err := SendSlackMessage(slackID, m.Body); err != nil {
 			log.Error("Failed to send Slack message: %v", err)
+		}
+
+	case "email":
+		// Send email reply for email conversations
+		if SendEmailReply == nil {
+			log.Warning("SendEmailReply function not set, cannot send email")
+			return
+		}
+		// Get user info for display name and avatar
+		var user *auth.User
+		if m.UserID != nil {
+			var u auth.User
+			if err := db.Where("id = ?", m.UserID.String()).First(&u).Error; err == nil {
+				user = &u
+			}
+		}
+		if err := SendEmailReply(m.ConversationID, m.ID, m.Body, user); err != nil {
+			log.Error("Failed to send email reply: %v", err)
 		}
 
 	default:

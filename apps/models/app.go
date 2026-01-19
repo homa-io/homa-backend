@@ -49,6 +49,12 @@ func (a App) Register() error {
 	// Conversation summary model
 	db.UseModel(ConversationSummary{})
 
+	// User preferences model
+	db.UseModel(UserPreference{})
+
+	// Email tracking model
+	db.UseModel(EmailMessage{})
+
 	return nil
 }
 

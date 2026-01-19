@@ -2,6 +2,7 @@ package conversation
 
 import (
 	"github.com/getevo/evo/v2"
+	"github.com/iesreza/homa-backend/apps/redis"
 )
 
 type App struct{}
@@ -16,12 +17,13 @@ func (a App) Router() error {
 	var agentController = AgentController{}
 	var translationController = TranslationController{}
 
-	// Client-facing APIs
+	// Client-facing APIs with rate limiting
+	evo.Use("/api/client/conversations", redis.EvoRateLimitMiddleware("client.create_conversation"))
 	evo.Put("/api/client/conversations", controller.CreateConversation)
 	evo.Post("/api/client/conversations/:conversation_id/:secret/messages", controller.AddClientMessage)
 	evo.Get("/api/client/conversations/:conversation_id/:secret", controller.GetConversationWithSecret)
 	evo.Delete("/api/client/conversations/:conversation_id/:secret", controller.CloseConversationWithSecret)
-	evo.Post("/api/client/upsert", controller.UpsertClient) // Changed to POST to match UI
+	evo.Post("/api/client/upsert", controller.UpsertClient)
 
 	// Admin conversation APIs
 	evo.Get("/api/admin/conversations/:conversation_id", controller.GetConversationDetail)
@@ -73,6 +75,11 @@ func (a App) Router() error {
 	// User Avatar APIs
 	evo.Post("/api/agent/me/avatar", agentController.UploadUserAvatar)
 	evo.Delete("/api/agent/me/avatar", agentController.DeleteUserAvatar)
+
+	// User Preferences APIs
+	evo.Get("/api/agent/me/preferences", agentController.GetUserPreferences)
+	evo.Put("/api/agent/me/preferences", agentController.UpdateUserPreferences)
+	evo.Get("/api/agent/notification-sounds", agentController.GetNotificationSounds)
 
 	// Translation APIs
 	evo.Post("/api/agent/conversations/:id/translations", translationController.GetTranslations)

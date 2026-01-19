@@ -2,6 +2,7 @@ package integrations
 
 import (
 	"github.com/getevo/evo/v2"
+	"github.com/iesreza/homa-backend/apps/integrations/email"
 	"github.com/iesreza/homa-backend/apps/models"
 )
 
@@ -12,6 +13,10 @@ func (a App) Register() error {
 	models.SendTelegramMessage = SendTelegramMessage
 	models.SendWhatsAppMessage = SendWhatsAppMessage
 	models.SendSlackMessage = SendSlackMessage
+
+	// Initialize email reply function
+	email.RegisterSendEmailReply()
+
 	return nil
 }
 

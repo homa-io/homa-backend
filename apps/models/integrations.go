@@ -32,6 +32,8 @@ type Integration struct {
 	Status    string    `gorm:"size:50;not null;default:'disabled'" json:"status"` // disabled, enabled, error
 	Config    string    `gorm:"type:text" json:"-"`                                // Encrypted JSON config (hidden from API)
 	LastError string    `gorm:"type:text" json:"last_error,omitempty"`
+	InboxID   *uint     `gorm:"index" json:"inbox_id,omitempty"`                   // Default inbox for conversations from this integration
+	Inbox     *Inbox    `gorm:"foreignKey:InboxID" json:"inbox,omitempty"`
 	TestedAt  *time.Time `json:"tested_at,omitempty"`
 	CreatedAt time.Time  `gorm:"autoCreateTime" json:"created_at"`
 	UpdatedAt time.Time  `gorm:"autoUpdateTime" json:"updated_at"`
@@ -112,6 +114,16 @@ func GetAllIntegrations() ([]Integration, error) {
 func GetEnabledIntegrations() ([]Integration, error) {
 	var integrations []Integration
 	err := db.Where("status = ?", IntegrationStatusEnabled).Find(&integrations).Error
+	return integrations, err
+}
+
+// GetEnabledEmailIntegrations retrieves all enabled email integrations (SMTP, Gmail, Outlook)
+func GetEnabledEmailIntegrations() ([]Integration, error) {
+	var integrations []Integration
+	emailTypes := []string{IntegrationTypeSMTP, IntegrationTypeGmail, IntegrationTypeOutlook}
+	err := db.Where("status = ?", IntegrationStatusEnabled).
+		Where("type IN ?", emailTypes).
+		Find(&integrations).Error
 	return integrations, err
 }
 

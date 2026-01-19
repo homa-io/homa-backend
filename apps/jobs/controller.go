@@ -4,56 +4,79 @@ import (
 	"strconv"
 
 	"github.com/getevo/evo/v2"
+	"github.com/getevo/evo/v2/lib/settings"
 	"github.com/iesreza/homa-backend/lib/response"
 )
 
-// JobResponse represents a job in API responses
-type JobResponse struct {
-	Name          string        `json:"name"`
-	Description   string        `json:"description"`
-	Schedule      string        `json:"schedule"`
-	Enabled       bool          `json:"enabled"`
-	LastExecution *JobExecution `json:"last_execution,omitempty"`
+// ListJobs returns all registered jobs with their status
+// GET /api/v1/jobs
+func ListJobs(r *evo.Request) any {
+	executor := GetExecutor()
+	jobs := executor.GetJobsInfo()
+
+	// Get base URL for trigger URLs
+	baseURL := getAPIBaseURL(r)
+
+	// Add trigger URL to each job
+	for i := range jobs {
+		jobs[i].TriggerURL = baseURL + "/api/v1/jobs/" + jobs[i].Name
+	}
+
+	// Trigger lazy cleanup of old logs
+	go CleanupOldLogs()
+
+	return response.OK(JobListResponse{Jobs: jobs})
 }
 
-// GetJobs returns all registered jobs with their last execution
-func GetJobs(r *evo.Request) any {
-	scheduler := GetScheduler()
-	if scheduler == nil {
-		return response.OK([]JobResponse{})
+// getAPIBaseURL returns the API base URL from settings or request
+func getAPIBaseURL(r *evo.Request) string {
+	// First check for configured API base URL
+	apiBaseURL := settings.Get("APP.API_BASE_URL").String()
+	if apiBaseURL != "" {
+		return apiBaseURL
 	}
 
-	jobs := scheduler.GetJobs()
-	jobResponses := make([]JobResponse, 0, len(jobs))
-
-	for name, job := range jobs {
-		jobResp := JobResponse{
-			Name:        name,
-			Description: job.Description,
-			Schedule:    job.Schedule,
-			Enabled:     job.Enabled,
-		}
-
-		// Get last execution
-		lastExec, err := scheduler.GetLastExecution(name)
-		if err == nil && lastExec != nil {
-			jobResp.LastExecution = lastExec
-		}
-
-		jobResponses = append(jobResponses, jobResp)
+	// Fallback to request headers for reverse proxy setups
+	proto := r.Get("X-Forwarded-Proto").String()
+	if proto == "" {
+		proto = "https"
 	}
 
-	return response.OK(jobResponses)
+	host := r.Get("X-Forwarded-Host").String()
+	if host == "" {
+		host = r.Hostname()
+	}
+
+	return proto + "://" + host
 }
 
-// GetJobExecutions returns recent executions for a specific job or all jobs
-func GetJobExecutions(r *evo.Request) any {
-	scheduler := GetScheduler()
-	if scheduler == nil {
-		return response.OK([]JobExecution{})
+// TriggerJob executes a job by name and returns the result
+// POST /api/v1/jobs/:name
+func TriggerJob(r *evo.Request) any {
+	jobName := r.Param("name").String()
+	if jobName == "" {
+		return response.BadRequest(nil, "Job name is required")
 	}
 
-	jobName := r.Query("job_name").String()
+	executor := GetExecutor()
+	result, err := executor.Execute(jobName)
+	if err != nil {
+		return response.InternalError(nil, err.Error())
+	}
+
+	// If job was skipped (already running)
+	if result.Status == JobStatusSkipped {
+		return response.Conflict(nil, result.Error)
+	}
+
+	return response.OK(result)
+}
+
+// GetJobHistory returns execution history for a job
+// GET /api/v1/jobs/:name/history
+func GetJobHistory(r *evo.Request) any {
+	jobName := r.Param("name").String()
+
 	limitStr := r.Query("limit").String()
 	limit := 20
 	if limitStr != "" {
@@ -61,12 +84,11 @@ func GetJobExecutions(r *evo.Request) any {
 			limit = parsed
 		}
 	}
-
 	if limit > 100 {
 		limit = 100
 	}
 
-	executions, err := scheduler.GetRecentExecutions(jobName, limit)
+	executions, err := GetExecutionHistory(jobName, limit)
 	if err != nil {
 		return response.InternalError(nil, err.Error())
 	}
@@ -74,22 +96,31 @@ func GetJobExecutions(r *evo.Request) any {
 	return response.OK(executions)
 }
 
-// RunJob triggers immediate execution of a job
-func RunJob(r *evo.Request) any {
-	scheduler := GetScheduler()
-	if scheduler == nil {
-		return response.InternalError(nil, "Scheduler not initialized")
-	}
-
+// GetJobStatus returns the current status of a job
+// GET /api/v1/jobs/:name/status
+func GetJobStatus(r *evo.Request) any {
 	jobName := r.Param("name").String()
 	if jobName == "" {
 		return response.BadRequest(nil, "Job name is required")
 	}
 
-	err := scheduler.RunNow(jobName)
-	if err != nil {
-		return response.InternalError(nil, err.Error())
+	registry := GetRegistry()
+	job, exists := registry.Get(jobName)
+	if !exists {
+		return response.NotFound(nil, "Job not found")
 	}
 
-	return response.OKWithMessage(nil, "Job triggered successfully")
+	executor := GetExecutor()
+	isRunning := executor.IsRunning(jobName)
+
+	// Get last execution
+	lastExec, _ := GetLastExecution(jobName)
+
+	return response.OK(map[string]interface{}{
+		"name":           job.Name,
+		"description":    job.Description,
+		"timeout_seconds": job.TimeoutSeconds,
+		"is_running":     isRunning,
+		"last_execution": lastExec,
+	})
 }

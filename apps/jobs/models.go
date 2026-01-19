@@ -1,9 +1,8 @@
 package jobs
 
 import (
+	"context"
 	"time"
-
-	"github.com/google/uuid"
 )
 
 // JobStatus represents the status of a job execution
@@ -13,20 +12,20 @@ const (
 	JobStatusRunning   JobStatus = "running"
 	JobStatusCompleted JobStatus = "completed"
 	JobStatusFailed    JobStatus = "failed"
+	JobStatusSkipped   JobStatus = "skipped" // When job is already running
 )
 
 // JobExecution tracks the execution history of background jobs
 type JobExecution struct {
-	ID               uuid.UUID  `gorm:"type:char(36);primaryKey" json:"id"`
-	JobName          string     `gorm:"size:100;not null;index:idx_job_started,priority:1" json:"job_name"`
-	InstanceID       string     `gorm:"size:100;not null" json:"instance_id"`
-	Status           JobStatus  `gorm:"size:20;not null;default:running" json:"status"`
-	StartedAt        time.Time  `gorm:"not null;index:idx_job_started,priority:2" json:"started_at"`
-	CompletedAt      *time.Time `gorm:"" json:"completed_at"`
-	DurationMs       int64      `gorm:"default:0" json:"duration_ms"`
-	RecordsProcessed int        `gorm:"default:0" json:"records_processed"`
-	Error            string     `gorm:"type:text" json:"error,omitempty"`
-	Metadata         string     `gorm:"type:json" json:"metadata,omitempty"`
+	ID          uint       `gorm:"primaryKey;autoIncrement" json:"id"`
+	JobName     string     `gorm:"size:100;not null;index:idx_job_name_started,priority:1" json:"job_name"`
+	Status      JobStatus  `gorm:"size:20;not null;default:running" json:"status"`
+	Result      string     `gorm:"type:text" json:"result,omitempty"`
+	Error       string     `gorm:"type:text" json:"error,omitempty"`
+	StartedAt   time.Time  `gorm:"not null;index:idx_job_name_started,priority:2" json:"started_at"`
+	CompletedAt *time.Time `json:"completed_at,omitempty"`
+	DurationMs  int64      `gorm:"default:0" json:"duration_ms"`
+	CreatedAt   time.Time  `gorm:"autoCreateTime" json:"created_at"`
 }
 
 // TableName returns the table name for JobExecution
@@ -34,54 +33,46 @@ func (JobExecution) TableName() string {
 	return "job_executions"
 }
 
-// JobDefinition defines a scheduled job
+// JobDefinition defines a background job
 type JobDefinition struct {
-	Name        string        // Unique job name
-	Description string        // Human-readable description
-	Schedule    string        // Cron expression
-	Timeout     time.Duration // Maximum execution time
-	Handler     JobHandler    // Function to execute
-	Enabled     bool          // Whether the job is enabled
+	Name           string        // Unique job name
+	Description    string        // Human-readable description
+	TimeoutSeconds int           // Maximum execution time in seconds
+	Handler        JobHandler    // Function to execute
+}
+
+// Timeout returns the timeout as time.Duration
+func (j *JobDefinition) Timeout() time.Duration {
+	if j.TimeoutSeconds <= 0 {
+		return 5 * time.Minute // Default 5 minutes
+	}
+	return time.Duration(j.TimeoutSeconds) * time.Second
 }
 
 // JobHandler is the function signature for job handlers
-type JobHandler func(ctx *JobContext) error
+// Returns a result (any JSON-serializable value) and an error
+type JobHandler func(ctx context.Context) (result interface{}, err error)
 
-// JobContext provides context and utilities to job handlers
-type JobContext struct {
-	JobName    string
-	ExecutionID uuid.UUID
-	StartedAt  time.Time
-	processed  int
-	metadata   map[string]interface{}
+// JobInfo is the API response for job listing
+type JobInfo struct {
+	Name           string `json:"name"`
+	Description    string `json:"description"`
+	TimeoutSeconds int    `json:"timeout_seconds"`
+	IsRunning      bool   `json:"is_running"`
+	TriggerURL     string `json:"trigger_url"`
 }
 
-// NewJobContext creates a new job context
-func NewJobContext(jobName string, executionID uuid.UUID) *JobContext {
-	return &JobContext{
-		JobName:     jobName,
-		ExecutionID: executionID,
-		StartedAt:   time.Now(),
-		metadata:    make(map[string]interface{}),
-	}
+// JobTriggerResponse is the API response for job trigger
+type JobTriggerResponse struct {
+	JobName     string      `json:"job_name"`
+	ExecutionID uint        `json:"execution_id"`
+	Status      JobStatus   `json:"status"`
+	Result      interface{} `json:"result,omitempty"`
+	Error       string      `json:"error,omitempty"`
+	DurationMs  int64       `json:"duration_ms"`
 }
 
-// IncrementProcessed increments the records processed counter
-func (ctx *JobContext) IncrementProcessed(count int) {
-	ctx.processed += count
-}
-
-// GetProcessed returns the number of records processed
-func (ctx *JobContext) GetProcessed() int {
-	return ctx.processed
-}
-
-// SetMetadata sets a metadata value
-func (ctx *JobContext) SetMetadata(key string, value interface{}) {
-	ctx.metadata[key] = value
-}
-
-// GetMetadata returns the metadata map
-func (ctx *JobContext) GetMetadata() map[string]interface{} {
-	return ctx.metadata
+// JobListResponse is the API response for listing jobs
+type JobListResponse struct {
+	Jobs []JobInfo `json:"jobs"`
 }

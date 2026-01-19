@@ -19,9 +19,16 @@ import (
 // Integration Management
 // ========================================
 
+// InboxInfo represents basic inbox info for integration response
+type InboxInfo struct {
+	ID   uint   `json:"id"`
+	Name string `json:"name"`
+}
+
 // ListIntegrations returns all integrations with masked configs
 func (c Controller) ListIntegrations(request *evo.Request) any {
-	integrations, err := models.GetAllIntegrations()
+	var integrations []models.Integration
+	err := db.Preload("Inbox").Order("type ASC").Find(&integrations).Error
 	if err != nil {
 		return response.Error(response.ErrInternalError)
 	}
@@ -34,6 +41,8 @@ func (c Controller) ListIntegrations(request *evo.Request) any {
 		Status    string                 `json:"status"`
 		Config    map[string]interface{} `json:"config,omitempty"`
 		LastError string                 `json:"last_error,omitempty"`
+		InboxID   *uint                  `json:"inbox_id,omitempty"`
+		Inbox     *InboxInfo             `json:"inbox,omitempty"`
 		TestedAt  *time.Time             `json:"tested_at,omitempty"`
 		CreatedAt time.Time              `json:"created_at"`
 		UpdatedAt time.Time              `json:"updated_at"`
@@ -41,6 +50,13 @@ func (c Controller) ListIntegrations(request *evo.Request) any {
 
 	result := make([]IntegrationResponse, len(integrations))
 	for i, integration := range integrations {
+		var inbox *InboxInfo
+		if integration.Inbox != nil {
+			inbox = &InboxInfo{
+				ID:   integration.Inbox.ID,
+				Name: integration.Inbox.Name,
+			}
+		}
 		result[i] = IntegrationResponse{
 			ID:        integration.ID,
 			Type:      integration.Type,
@@ -48,6 +64,8 @@ func (c Controller) ListIntegrations(request *evo.Request) any {
 			Status:    integration.Status,
 			Config:    integrationsDriver.GetMaskedConfig(integration.Type, integration.Config),
 			LastError: integration.LastError,
+			InboxID:   integration.InboxID,
+			Inbox:     inbox,
 			TestedAt:  integration.TestedAt,
 			CreatedAt: integration.CreatedAt,
 			UpdatedAt: integration.UpdatedAt,
@@ -67,18 +85,29 @@ func (c Controller) ListIntegrationTypes(request *evo.Request) any {
 func (c Controller) GetIntegration(request *evo.Request) any {
 	integrationType := request.Param("type").String()
 
-	integration, err := models.GetIntegration(integrationType)
+	var integration models.Integration
+	err := db.Preload("Inbox").Where("type = ?", integrationType).First(&integration).Error
 	if err != nil {
 		if err == gorm.ErrRecordNotFound {
 			// Return empty integration with type info
 			return response.OK(map[string]interface{}{
-				"type":   integrationType,
-				"name":   getIntegrationName(integrationType),
-				"status": models.IntegrationStatusDisabled,
-				"config": nil,
+				"type":     integrationType,
+				"name":     getIntegrationName(integrationType),
+				"status":   models.IntegrationStatusDisabled,
+				"config":   nil,
+				"inbox_id": nil,
+				"inbox":    nil,
 			})
 		}
 		return response.Error(response.ErrInternalError)
+	}
+
+	var inbox *InboxInfo
+	if integration.Inbox != nil {
+		inbox = &InboxInfo{
+			ID:   integration.Inbox.ID,
+			Name: integration.Inbox.Name,
+		}
 	}
 
 	return response.OK(map[string]interface{}{
@@ -88,6 +117,8 @@ func (c Controller) GetIntegration(request *evo.Request) any {
 		"status":     integration.Status,
 		"config":     integrationsDriver.GetMaskedConfig(integration.Type, integration.Config),
 		"last_error": integration.LastError,
+		"inbox_id":   integration.InboxID,
+		"inbox":      inbox,
 		"tested_at":  integration.TestedAt,
 		"created_at": integration.CreatedAt,
 		"updated_at": integration.UpdatedAt,
@@ -111,8 +142,9 @@ func (c Controller) SaveIntegration(request *evo.Request) any {
 	integrationType := request.Param("type").String()
 
 	var req struct {
-		Status string                 `json:"status"`
-		Config map[string]interface{} `json:"config"`
+		Status  string                 `json:"status"`
+		Config  map[string]interface{} `json:"config"`
+		InboxID *uint                  `json:"inbox_id"`
 	}
 
 	if err := request.BodyParser(&req); err != nil {
@@ -145,9 +177,21 @@ func (c Controller) SaveIntegration(request *evo.Request) any {
 	integration.Status = req.Status
 	integration.Config = string(configJSON)
 	integration.LastError = ""
+	integration.InboxID = req.InboxID
 
 	if err := models.UpsertIntegration(integration); err != nil {
 		return response.Error(response.ErrInternalError)
+	}
+
+	// Reload with inbox
+	db.Preload("Inbox").First(integration, integration.ID)
+
+	var inbox *InboxInfo
+	if integration.Inbox != nil {
+		inbox = &InboxInfo{
+			ID:   integration.Inbox.ID,
+			Name: integration.Inbox.Name,
+		}
 	}
 
 	// Call OnSave callback for post-save actions (e.g., webhook registration)
@@ -161,6 +205,8 @@ func (c Controller) SaveIntegration(request *evo.Request) any {
 		"status":          integration.Status,
 		"config":          integrationsDriver.GetMaskedConfig(integration.Type, integration.Config),
 		"last_error":      integration.LastError,
+		"inbox_id":        integration.InboxID,
+		"inbox":           inbox,
 		"tested_at":       integration.TestedAt,
 		"updated_at":      integration.UpdatedAt,
 		"on_save_success": onSaveResult.Success,

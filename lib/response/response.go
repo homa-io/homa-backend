@@ -402,3 +402,8 @@ func NotFound(c interface{}, message string) outcome.Response {
 func InternalError(c interface{}, message string) outcome.Response {
 	return Error(NewError(ErrorCodeInternalError, message, http.StatusInternalServerError))
 }
+
+// Conflict creates a 409 Conflict response
+func Conflict(c interface{}, message string) outcome.Response {
+	return Error(NewError(ErrorCodeConflict, message, http.StatusConflict))
+}

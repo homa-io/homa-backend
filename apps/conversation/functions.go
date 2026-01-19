@@ -32,6 +32,7 @@ type ConversationInput struct {
 	IP              *string        `json:"ip"`         // Client IP address
 	Browser         *string        `json:"browser"`    // Browser name and version
 	OperatingSystem *string        `json:"operating_system"` // OS name and version
+	InboxID         *uint          `json:"inbox_id"`   // Optional inbox ID for web conversations
 }
 
 // ClientInput represents the input structure for creating or updating clients
@@ -84,6 +85,7 @@ func CreateConversation(input ConversationInput) (*models.Conversation, string, 
 		IP:              input.IP,
 		Browser:         input.Browser,
 		OperatingSystem: input.OperatingSystem,
+		InboxID:         input.InboxID,
 	}
 
 	// Save to database

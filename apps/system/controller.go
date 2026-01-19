@@ -10,6 +10,7 @@ import (
 	"github.com/iesreza/homa-backend/apps/auth"
 	"github.com/iesreza/homa-backend/apps/models"
 	natsconn "github.com/iesreza/homa-backend/apps/nats"
+	"github.com/iesreza/homa-backend/apps/redis"
 	"github.com/iesreza/homa-backend/lib/response"
 )
 
@@ -370,4 +371,90 @@ func (c Controller) GetEntityActivityLogs(req *evo.Request) interface{} {
 	}
 
 	return response.List(logs, len(logs))
+}
+
+// RateLimitUpdateRequest represents a request to update a rate limit setting
+type RateLimitUpdateRequest struct {
+	MaxRequests int  `json:"max_requests"`
+	WindowSecs  int  `json:"window_seconds"`
+	Enabled     bool `json:"enabled"`
+}
+
+// GetRateLimitSettings returns all rate limit settings
+// @Summary Get rate limit settings
+// @Description Get all rate limit endpoint configurations
+// @Tags Rate Limiting
+// @Accept json
+// @Produce json
+// @Security BearerAuth
+// @Success 200 {array} redis.RateLimitEndpoint
+// @Router /api/settings/rate-limits [get]
+func (c Controller) GetRateLimitSettings(req *evo.Request) interface{} {
+	settings := redis.GetRateLimitSettings()
+	return response.List(settings, len(settings))
+}
+
+// UpdateRateLimitSetting updates a single rate limit setting
+// @Summary Update rate limit setting
+// @Description Update rate limit configuration for a specific endpoint
+// @Tags Rate Limiting
+// @Accept json
+// @Produce json
+// @Security BearerAuth
+// @Param key path string true "Rate limit endpoint key"
+// @Param body body RateLimitUpdateRequest true "Rate limit configuration"
+// @Success 200 {object} response.Response
+// @Router /api/settings/rate-limits/{key} [put]
+func (c Controller) UpdateRateLimitSetting(req *evo.Request) interface{} {
+	key := req.Param("key").String()
+	if key == "" {
+		return response.Error(response.NewError(response.ErrorCodeInvalidInput, "Key is required", 400))
+	}
+
+	// Validate the key exists
+	validKey := false
+	for _, endpoint := range redis.DefaultEndpoints {
+		if endpoint.Key == key {
+			validKey = true
+			break
+		}
+	}
+	if !validKey {
+		return response.Error(response.NewError(response.ErrorCodeNotFound, "Invalid rate limit endpoint key", 404))
+	}
+
+	var request RateLimitUpdateRequest
+	if err := req.BodyParser(&request); err != nil {
+		return response.Error(response.ErrInvalidInput)
+	}
+
+	// Validate values
+	if request.MaxRequests < 1 {
+		return response.Error(response.NewError(response.ErrorCodeInvalidInput, "Max requests must be at least 1", 400))
+	}
+	if request.WindowSecs < 1 {
+		return response.Error(response.NewError(response.ErrorCodeInvalidInput, "Window must be at least 1 second", 400))
+	}
+
+	if err := redis.SaveRateLimitSetting(key, request.MaxRequests, request.WindowSecs, request.Enabled); err != nil {
+		return response.Error(response.ErrDatabaseError)
+	}
+
+	return response.OK("Rate limit setting updated successfully")
+}
+
+// GetRedisStatus returns the Redis connection status
+// @Summary Get Redis status
+// @Description Check if Redis is connected and available
+// @Tags Rate Limiting
+// @Accept json
+// @Produce json
+// @Security BearerAuth
+// @Success 200 {object} response.Response
+// @Router /api/settings/rate-limits/status [get]
+func (c Controller) GetRedisStatus(req *evo.Request) interface{} {
+	available := redis.IsAvailable()
+	return response.OK(map[string]bool{
+		"connected": available,
+	})
 }

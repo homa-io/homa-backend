@@ -3,9 +3,13 @@ module github.com/iesreza/homa-backend
 go 1.24.5
 
 require (
+	github.com/CloudyKit/jet/v6 v6.3.1
 	github.com/aws/aws-sdk-go-v2 v1.41.0
 	github.com/aws/aws-sdk-go-v2/credentials v1.19.6
 	github.com/aws/aws-sdk-go-v2/service/s3 v1.95.0
+	github.com/emersion/go-imap v1.2.1
+	github.com/emersion/go-message v0.18.2
+	github.com/emersion/go-sasl v0.0.0-20241020182733-b788ff22d5a6
 	github.com/getevo/evo/v2 v2.0.0-20250803100056-4181342db580
 	github.com/getevo/pagination v0.0.0-20250131105349-5a8643e40215
 	github.com/getevo/restify v0.0.0-20241218131058-fbfe13ac4b80
@@ -17,6 +21,9 @@ require (
 	github.com/google/uuid v1.6.0
 	github.com/hlandau/passlib v1.0.11
 	github.com/nats-io/nats.go v1.46.1
+	github.com/pemistahl/lingua-go v1.4.0
+	github.com/redis/go-redis/v9 v9.17.2
+	github.com/tdewolff/minify/v2 v2.24.8
 	golang.org/x/image v0.34.0
 	golang.org/x/oauth2 v0.30.0
 	gorm.io/datatypes v1.2.6
@@ -27,7 +34,6 @@ require (
 	cloud.google.com/go/compute/metadata v0.3.0 // indirect
 	filippo.io/edwards25519 v1.1.0 // indirect
 	github.com/CloudyKit/fastprinter v0.0.0-20200109182630-33d98a066a53 // indirect
-	github.com/CloudyKit/jet/v6 v6.3.1 // indirect
 	github.com/alecthomas/repr v0.4.0 // indirect
 	github.com/andybalholm/brotli v1.1.1 // indirect
 	github.com/araddon/dateparse v0.0.0-20210429162001-6b43995a97de // indirect
@@ -41,6 +47,8 @@ require (
 	github.com/aws/aws-sdk-go-v2/service/internal/presigned-url v1.13.16 // indirect
 	github.com/aws/aws-sdk-go-v2/service/internal/s3shared v1.19.16 // indirect
 	github.com/aws/smithy-go v1.24.0 // indirect
+	github.com/cespare/xxhash/v2 v2.3.0 // indirect
+	github.com/dgryski/go-rendezvous v0.0.0-20200823014737-9f7001d12a5f // indirect
 	github.com/fasthttp/websocket v1.5.8 // indirect
 	github.com/gabriel-vasile/mimetype v1.4.8 // indirect
 	github.com/getevo/json v0.0.0-20240816130540-f0ea83b195d9 // indirect
@@ -65,13 +73,10 @@ require (
 	github.com/nats-io/nuid v1.0.1 // indirect
 	github.com/otiai10/copy v1.14.1 // indirect
 	github.com/otiai10/mint v1.6.3 // indirect
-	github.com/pemistahl/lingua-go v1.4.0 // indirect
 	github.com/philhofer/fwd v1.1.3-0.20240916144458-20a13a1f6b7c // indirect
 	github.com/rivo/uniseg v0.4.7 // indirect
-	github.com/robfig/cron/v3 v3.0.1 // indirect
 	github.com/savsgio/gotils v0.0.0-20240303185622-093b76447511 // indirect
 	github.com/shopspring/decimal v1.4.0 // indirect
-	github.com/tdewolff/minify/v2 v2.24.8 // indirect
 	github.com/tdewolff/parse/v2 v2.8.5 // indirect
 	github.com/tidwall/gjson v1.18.0 // indirect
 	github.com/tidwall/match v1.1.1 // indirect

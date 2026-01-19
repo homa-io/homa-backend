@@ -59,4 +59,6 @@ var SensitiveFields = map[string]bool{
 	"password":        true,
 	"client_secret":   true,
 	"refresh_token":   true,
+	"smtp_password":   true,
+	"imap_password":   true,
 }

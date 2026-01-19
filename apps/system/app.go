@@ -89,6 +89,12 @@ func (a App) Router() error {
 	evo.Use("/api/settings", controller.AdminMiddleware)
 	evo.Get("/api/settings", controller.GetSettings)
 	evo.Put("/api/settings", controller.UpdateSettings)
+
+	// Rate limit settings
+	evo.Get("/api/settings/rate-limits", controller.GetRateLimitSettings)
+	evo.Get("/api/settings/rate-limits/status", controller.GetRedisStatus)
+	evo.Put("/api/settings/rate-limits/:key", controller.UpdateRateLimitSetting)
+
 	evo.Get("/api/settings/:key", controller.GetSetting)
 	evo.Put("/api/settings/:key", controller.SetSetting)
 	evo.Delete("/api/settings/:key", controller.DeleteSetting)
